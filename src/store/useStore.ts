@@ -763,21 +763,26 @@ export function bakeMapsInWorker(
   });
 }
 
-function b64Encode(bytes: Uint8Array): string {
-  let binary = '';
-  for (let i = 0; i < bytes.byteLength; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
-}
-
-function b64Decode(str: string): Uint8Array {
-  const binary = atob(str);
+function decodeLegacyImage(value: string): Blob {
+  const binary = atob(value);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) {
     bytes[i] = binary.charCodeAt(i);
   }
-  return bytes;
+  return new Blob([bytes]);
+}
+
+type StoredDepthData = NonNullable<ProjectData['depthCache']>['data'];
+
+function copyStoredDepthData(data: StoredDepthData): Float32Array | null {
+  if (data instanceof Float32Array) return new Float32Array(data);
+  if (data instanceof ArrayBuffer) return new Float32Array(data);
+  if (Array.isArray(data)) return Float32Array.from(data);
+  if (ArrayBuffer.isView(data)) {
+    const view = data as unknown as ArrayBufferView;
+    return new Float32Array(view.buffer, view.byteOffset, view.byteLength / 4);
+  }
+  return null;
 }
 
 export const useStore = create<StoreState>((set, get) => ({
@@ -1067,19 +1072,15 @@ export const useStore = create<StoreState>((set, get) => ({
   saveProject: async () => {
     const s = get();
     const db = await getDB();
-
-    let imageDataBase64: string | undefined;
-    if (s.image) {
-      const arrayBuffer = await s.image.arrayBuffer();
-      imageDataBase64 = b64Encode(new Uint8Array(arrayBuffer));
-    }
+    const timestamp = new Date().toISOString();
 
     const project: ProjectData = {
       id: s.projectId,
       name: s.projectName,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      imageDataBase64,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      imageBlob: s.image ?? undefined,
+      imageName: s.image?.name,
       imageWidth: s.imageWidth || undefined,
       imageHeight: s.imageHeight || undefined,
       params: getProjectParams(s),
@@ -1087,7 +1088,7 @@ export const useStore = create<StoreState>((set, get) => ({
         ? {
             width: s.depthResult.width,
             height: s.depthResult.height,
-            data: Array.from(s.depthResult.data),
+            data: new Float32Array(s.depthResult.data),
           }
         : undefined,
     };
@@ -1107,22 +1108,66 @@ export const useStore = create<StoreState>((set, get) => ({
     let imageBitmap: ImageBitmap | null = null;
     let image: File | null = null;
     let imageUrl: string | null = null;
+    let imageBlob: Blob | undefined = project.imageBlob;
+    let migrated = project.imageDataBase64 !== undefined;
+    let loadError: string | null = null;
 
-    if (project.imageDataBase64) {
-      const bytes = b64Decode(project.imageDataBase64);
-      const blob = new Blob([bytes]);
-      image = new File([blob], `${project.name}.png`);
-      imageUrl = URL.createObjectURL(blob);
-      imageBitmap = await createImageBitmap(blob);
+    if (!imageBlob && project.imageDataBase64) {
+      try {
+        imageBlob = decodeLegacyImage(project.imageDataBase64);
+        migrated = true;
+      } catch (error) {
+        loadError = error instanceof Error ? error.message : String(error);
+      }
     }
 
-    const depthResult: DepthResult | null = project.depthCache
-      ? {
+    if (imageBlob) {
+      try {
+        image = new File(
+          [imageBlob],
+          project.imageName ?? `${project.name}.png`,
+          { type: imageBlob.type },
+        );
+        imageUrl = URL.createObjectURL(imageBlob);
+        imageBitmap = await createImageBitmap(imageBlob);
+      } catch (error) {
+        loadError = error instanceof Error ? error.message : String(error);
+        image = null;
+        imageUrl = null;
+        imageBitmap = null;
+      }
+    }
+
+    let depthResult: DepthResult | null = null;
+    if (project.depthCache) {
+      const depthData = copyStoredDepthData(project.depthCache.data);
+      if (depthData && depthData.length === project.depthCache.width * project.depthCache.height) {
+        depthResult = {
           width: project.depthCache.width,
           height: project.depthCache.height,
-          data: new Float32Array(project.depthCache.data),
-        }
-      : null;
+          data: depthData,
+        };
+        if (Array.isArray(project.depthCache.data)) migrated = true;
+      } else {
+        loadError = 'Project depth cache has an invalid size or format';
+      }
+    }
+
+    if (migrated && imageBlob) {
+      const upgraded: ProjectData = {
+        ...project,
+        imageBlob,
+        imageDataBase64: undefined,
+        depthCache: project.depthCache && depthResult
+          ? {
+              width: depthResult.width,
+              height: depthResult.height,
+              data: new Float32Array(depthResult.data),
+            }
+          : undefined,
+      };
+      await db.put(STORE_NAME, upgraded);
+    }
 
     set({
       projectId: project.id,
@@ -1136,6 +1181,7 @@ export const useStore = create<StoreState>((set, get) => ({
       meshResult: null,
       viewportInfo: null,
       previewMaps: {},
+      error: loadError,
       ...project.params,
     });
 

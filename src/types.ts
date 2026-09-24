@@ -140,11 +140,17 @@ export interface ProjectData {
   name: string;
   createdAt: string;
   updatedAt: string;
+  imageBlob?: Blob;
+  imageName?: string;
   imageDataBase64?: string;
   imageWidth?: number;
   imageHeight?: number;
   params: ProjectParams;
-  depthCache?: { width: number; height: number; data: number[] };
+  depthCache?: {
+    width: number;
+    height: number;
+    data: Float32Array | number[] | ArrayBuffer;
+  };
 }
 
 export interface ViewportInfo {
