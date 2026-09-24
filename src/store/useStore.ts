@@ -47,6 +47,71 @@ const STORE_NAME = 'projects';
 const MAX_INPUT_DIMENSION = 4096;
 const MAX_INPUT_FILE_BYTES = 100 * 1024 * 1024;
 
+type ImageDimensions = { width: number; height: number };
+
+function readUint24LE(bytes: Uint8Array, offset: number): number {
+  return bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16);
+}
+
+function inspectImageDimensions(bytes: Uint8Array, type: string): ImageDimensions | null {
+  if (type === 'image/png' && bytes.length >= 24) {
+    const signature = [137, 80, 78, 71, 13, 10, 26, 10];
+    if (signature.every((value, index) => bytes[index] === value)) {
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      return { width: view.getUint32(16), height: view.getUint32(20) };
+    }
+  }
+
+  if (type === 'image/jpeg' && bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
+    let offset = 2;
+    while (offset + 9 < bytes.length) {
+      if (bytes[offset] !== 0xff) {
+        offset += 1;
+        continue;
+      }
+      const marker = bytes[offset + 1];
+      offset += 2;
+      if (marker === 0xd8 || marker === 0xd9) continue;
+      if (marker === 0xda) break;
+      const segmentLength = (bytes[offset] << 8) | bytes[offset + 1];
+      const isStartOfFrame = marker >= 0xc0 && marker <= 0xc3 || marker >= 0xc5 && marker <= 0xc7 || marker >= 0xc9 && marker <= 0xcb || marker >= 0xcd && marker <= 0xcf;
+      if (isStartOfFrame) {
+        return {
+          height: (bytes[offset + 3] << 8) | bytes[offset + 4],
+          width: (bytes[offset + 5] << 8) | bytes[offset + 6],
+        };
+      }
+      if (segmentLength < 2) break;
+      offset += segmentLength;
+    }
+  }
+
+  if (type === 'image/webp' && bytes.length >= 30 && String.fromCharCode(...bytes.slice(0, 4)) === 'RIFF' && String.fromCharCode(...bytes.slice(8, 12)) === 'WEBP') {
+    const chunk = String.fromCharCode(...bytes.slice(12, 16));
+    if (chunk === 'VP8X') {
+      return {
+        width: readUint24LE(bytes, 24) + 1,
+        height: readUint24LE(bytes, 27) + 1,
+      };
+    }
+    if (chunk === 'VP8 ' && bytes[23] === 0x9d && bytes[24] === 0x01 && bytes[25] === 0x2a) {
+      return {
+        width: (bytes[26] | (bytes[27] << 8)) & 0x3fff,
+        height: (bytes[28] | (bytes[29] << 8)) & 0x3fff,
+      };
+    }
+    if (chunk === 'VP8L' && bytes[20] === 0x2f) {
+      const bits = bytes[21] | (bytes[22] << 8) | (bytes[23] << 16) | (bytes[24] << 24);
+      return {
+        width: (bits & 0x3fff) + 1,
+        height: ((bits >>> 14) & 0x3fff) + 1,
+      };
+    }
+  }
+
+  return null;
+}
+
 async function getDB(): Promise<IDBPDatabase> {
   return openDB(DB_NAME, DB_VERSION, {
     upgrade(db) {
@@ -1033,18 +1098,18 @@ export const useStore = create<StoreState>((set, get) => ({
     let bitmap: ImageBitmap | null = null;
 
     try {
-      bitmap = await createImageBitmap(await fetch(url).then((r) => r.blob()));
-      if (bitmap.width > MAX_INPUT_DIMENSION || bitmap.height > MAX_INPUT_DIMENSION) {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const dimensions = inspectImageDimensions(bytes, file.type);
+      if (!dimensions) throw new Error('Unsupported image format. Use PNG, JPEG, or WebP.');
+      if (dimensions.width > MAX_INPUT_DIMENSION || dimensions.height > MAX_INPUT_DIMENSION) {
         throw new Error(`Images must be ${MAX_INPUT_DIMENSION} × ${MAX_INPUT_DIMENSION} pixels or smaller.`);
       }
+      bitmap = await createImageBitmap(new Blob([bytes], { type: file.type }));
       if (generation !== operationGeneration) {
         bitmap.close();
         URL.revokeObjectURL(url);
         return;
       }
-
-      previous.imageBitmap?.close();
-      if (previous.imageUrl) URL.revokeObjectURL(previous.imageUrl);
 
       const state = get();
       const cap = await detectCapability();
@@ -1053,6 +1118,9 @@ export const useStore = create<StoreState>((set, get) => ({
         URL.revokeObjectURL(url);
         return;
       }
+
+      previous.imageBitmap?.close();
+      if (previous.imageUrl) URL.revokeObjectURL(previous.imageUrl);
 
       set({
         image: file,
@@ -1363,10 +1431,17 @@ export const useStore = create<StoreState>((set, get) => ({
 
     if (imageBlob) {
       try {
+        const imageType = imageBlob.type || (project.imageName?.toLowerCase().endsWith('.jpg') || project.imageName?.toLowerCase().endsWith('.jpeg') ? 'image/jpeg' : 'image/png');
+        const imageBytes = new Uint8Array(await imageBlob.arrayBuffer());
+        const dimensions = inspectImageDimensions(imageBytes, imageType);
+        if (!dimensions) throw new Error('Saved project image has an unsupported format.');
+        if (dimensions.width > MAX_INPUT_DIMENSION || dimensions.height > MAX_INPUT_DIMENSION) {
+          throw new Error(`Saved project images must be ${MAX_INPUT_DIMENSION} × ${MAX_INPUT_DIMENSION} pixels or smaller.`);
+        }
         image = new File(
           [imageBlob],
           project.imageName ?? `${project.name}.png`,
-          { type: imageBlob.type },
+          { type: imageType },
         );
         imageUrl = URL.createObjectURL(imageBlob);
         imageBitmap = await createImageBitmap(imageBlob);
@@ -1481,6 +1556,8 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   deleteProject: async (id: string) => {
+    saveRevision += 1;
+    await saveQueue;
     const db = await getDB();
     await db.delete(STORE_NAME, id);
     set((s) => ({

@@ -17,6 +17,7 @@ export default function Header() {
   const projectName = useStore((s) => s.projectName)
   const materialMode = useStore((s) => s.materialMode)
   const image = useStore((s) => s.image)
+  const meshResult = useStore((s) => s.meshResult)
   const isProcessing = useStore((s) => s.isProcessing)
   const depthResult = useStore((s) => s.depthResult)
   const leftPanelOpen = useStore((s) => s.leftPanelOpen)
@@ -224,7 +225,8 @@ export default function Header() {
             </button>
             <button
               onClick={() => setExportDialogOpen(true)}
-              className="px-2.5 py-1 rounded text-xs font-medium bg-[var(--color-brand)] text-white hover:bg-[var(--color-brand-dark)] transition-colors"
+              disabled={isProcessing || !meshResult}
+              className="px-2.5 py-1 rounded text-xs font-medium bg-[var(--color-brand)] text-white hover:bg-[var(--color-brand-dark)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               aria-label="Export project"
             >
               Export

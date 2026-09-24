@@ -58,6 +58,7 @@ export default function ExportDialog() {
   const exportDialogOpen = useStore((s) => s.exportDialogOpen)
   const mesh = useStore((s) => s.meshResult)
   const image = useStore((s) => s.image)
+  const isProcessing = useStore((s) => s.isProcessing)
   const viewportInfo = useStore((s) => s.viewportInfo)
   const depthResult = useStore((s) => s.depthResult)
   const maps = useStore((s) => s.maps)
@@ -133,6 +134,10 @@ export default function ExportDialog() {
   const handleExport = useCallback(async () => {
     if (!mesh) {
       setExportError('No mesh loaded')
+      return
+    }
+    if (isProcessing) {
+      setExportError('Wait for the current mesh calculation to finish before exporting.')
       return
     }
 
@@ -294,7 +299,7 @@ export default function ExportDialog() {
       }
     }
   }, [
-    mesh, image, format, axis, includeTextures, texturePacking, unit, scale,
+    mesh, image, isProcessing, format, axis, includeTextures, texturePacking, unit, scale,
     showTextures, depthResult, maps,
     close, setProcessing, setError,
   ])
