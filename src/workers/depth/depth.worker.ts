@@ -94,10 +94,15 @@ async function loadPipeline(): Promise<InitResult> {
 async function initializePipeline(): Promise<InitResult> {
   if (pipeline) return { success: true, device };
   if (!initialization) {
-    initialization = loadPipeline().catch((error: unknown) => {
-      initialization = null;
-      throw error;
-    });
+    initialization = loadPipeline()
+      .then((result) => {
+        if (!result.success) initialization = null;
+        return result;
+      })
+      .catch((error: unknown) => {
+        initialization = null;
+        throw error;
+      });
   }
   return initialization;
 }
