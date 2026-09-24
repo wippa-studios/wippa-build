@@ -4,8 +4,19 @@ import { createCancellationRegistry } from '../../lib/workers/cancellation';
 
 type Device = 'webgpu' | 'wasm' | 'none';
 
-type DepthPipeline = ((input: ImageBitmap) => Promise<{
-  depth: ImageData | HTMLCanvasElement;
+type RawImageLike = {
+  data: Uint8Array | Uint8ClampedArray;
+  width: number;
+  height: number;
+  channels: number;
+};
+
+type RawImageFactory = {
+  fromCanvas: (canvas: OffscreenCanvas) => RawImageLike;
+};
+
+type DepthPipeline = ((input: RawImageLike) => Promise<{
+  depth: RawImageLike;
 }>) & {
   dispose?: () => Promise<void> | void;
 };
@@ -30,13 +41,15 @@ type WorkerMessage =
   | { type: 'dispose' };
 
 let pipeline: DepthPipeline | null = null;
+let rawImageFactory: RawImageFactory | null = null;
 let device: Device = 'none';
 let initialization: Promise<InitResult> | null = null;
 const cancelledIds = createCancellationRegistry();
 
 async function loadPipeline(): Promise<InitResult> {
   try {
-    const { pipeline: createPipeline } = await import('@huggingface/transformers');
+    const { pipeline: createPipeline, RawImage } = await import('@huggingface/transformers');
+    rawImageFactory = RawImage as unknown as RawImageFactory;
 
     try {
       const candidate = await createPipeline(
@@ -136,7 +149,7 @@ async function handleEstimate(
   targetH: number,
   invert: boolean,
 ): Promise<void> {
-  if (!pipeline) {
+  if (!pipeline || !rawImageFactory) {
     image.close();
     self.postMessage({ type: 'error', id, error: 'Pipeline not initialized' });
     return;
@@ -148,31 +161,23 @@ async function handleEstimate(
   }
 
   try {
-    const result = await pipeline(image);
-    image.close();
+    const canvas = new OffscreenCanvas(targetW, targetH);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Failed to get 2D context for depth input');
+    ctx.drawImage(image, 0, 0, targetW, targetH);
+    const rawImage = rawImageFactory.fromCanvas(canvas);
+    const result = await pipeline(rawImage);
 
     if (cancelledIds.consume(id)) return;
 
     const depthData = result.depth;
-    let depthPixels: Uint8ClampedArray;
-    let modelW: number;
-    let modelH: number;
-
-    if (depthData instanceof HTMLCanvasElement) {
-      const ctx = depthData.getContext('2d');
-      if (!ctx) throw new Error('Depth model returned a canvas without a 2D context');
-      modelW = depthData.width;
-      modelH = depthData.height;
-      depthPixels = ctx.getImageData(0, 0, modelW, modelH).data;
-    } else {
-      modelW = depthData.width;
-      modelH = depthData.height;
-      depthPixels = depthData.data;
-    }
-
+    const depthPixels = depthData.data;
+    const modelW = depthData.width;
+    const modelH = depthData.height;
     const pixelCount = modelW * modelH;
     const normalized = new Float32Array(pixelCount);
-    const rgba = depthPixels.length === pixelCount * 4;
+    const channels = depthData.channels || (depthPixels.length === pixelCount * 4 ? 4 : 1);
+    const rgba = channels === 4;
 
     for (let i = 0; i < pixelCount; i++) {
       const value = depthPixels[rgba ? i * 4 : i] / 255;
@@ -191,13 +196,14 @@ async function handleEstimate(
       [resampled.buffer],
     );
   } catch (error) {
-    image.close();
     if (cancelledIds.consume(id)) return;
     self.postMessage({
       type: 'error',
       id,
       error: error instanceof Error ? error.message : String(error),
     });
+  } finally {
+    image.close();
   }
 }
 
@@ -210,6 +216,7 @@ async function handleDispose(): Promise<void> {
     await pipeline.dispose();
   }
   pipeline = null;
+  rawImageFactory = null;
   device = 'none';
   initialization = null;
   cancelledIds.clear();
