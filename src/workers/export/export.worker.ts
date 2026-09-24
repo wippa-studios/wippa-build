@@ -25,6 +25,7 @@ type WorkerResult =
       format: 'gltf';
       json: object;
       bin: ArrayBuffer;
+      binName: string;
       textures: Array<{ name: string; blob: Blob }>;
     }
   | { type: 'export-result'; id: string; format: 'obj'; obj: string; mtl: string }
@@ -39,9 +40,9 @@ type WorkerResult =
 
 const cancelled = new Set<string>();
 
-function convertMapsToBlobs(
+async function convertMapsToBlobs(
   maps: Record<string, { width: number; height: number; data: ArrayBuffer }> | undefined,
-): { normal?: Blob; ao?: Blob; roughness?: Blob; height?: Blob } | undefined {
+): Promise<{ normal?: Blob; ao?: Blob; roughness?: Blob; height?: Blob } | undefined> {
   if (!maps) return undefined;
 
   const result: {
@@ -52,7 +53,12 @@ function convertMapsToBlobs(
   } = {};
 
   for (const [name, entry] of Object.entries(maps)) {
-    const blob = new Blob([entry.data], { type: 'image/png' });
+    const imageData = new ImageData(
+      new Uint8ClampedArray(entry.data),
+      entry.width,
+      entry.height,
+    );
+    const blob = await imageDataToPngBlob(imageData);
     switch (name) {
       case 'normal':
         result.normal = blob;
@@ -80,7 +86,7 @@ async function handleExport(msg: {
 }): Promise<WorkerResult> {
   const { id, mesh, options, maps } = msg;
   const format = options.format;
-  const mapsBlob = convertMapsToBlobs(maps);
+  const mapsBlob = await convertMapsToBlobs(maps);
 
   switch (format) {
     case 'glb': {
@@ -94,7 +100,7 @@ async function handleExport(msg: {
       result.textures.forEach((blob, name) => {
         textures.push({ name, blob });
       });
-      return { type: 'export-result', id, format: 'gltf', json: result.json, bin: result.bin, textures };
+      return { type: 'export-result', id, format: 'gltf', json: result.json, bin: result.bin, binName: result.binName, textures };
     }
 
     case 'obj': {

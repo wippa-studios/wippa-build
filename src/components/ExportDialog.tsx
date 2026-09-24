@@ -226,7 +226,7 @@ export default function ExportDialog() {
       )
       workerRef.current = worker
 
-      type ExportWorkerResult = { type: string; id: string; format: string; blob?: Blob; json?: object; bin?: ArrayBuffer; obj?: string; mtl?: string; textures?: Array<{ name: string; blob: Blob }>; maps?: Array<{ name: string; blob: Blob }> }
+      type ExportWorkerResult = { type: string; id: string; format: string; blob?: Blob; json?: object; bin?: ArrayBuffer; binName?: string; obj?: string; mtl?: string; textures?: Array<{ name: string; blob: Blob }>; maps?: Array<{ name: string; blob: Blob }> }
       const result = await new Promise<ExportWorkerResult>((resolve, reject) => {
         const timeout = setTimeout(() => {
           reject(new Error('Export timed out'))
@@ -270,7 +270,7 @@ export default function ExportDialog() {
           if (result.bin) {
             downloadBlob(
               new Blob([result.bin], { type: 'application/octet-stream' }),
-              `${projectName}.bin`
+              result.binName ?? 'geometry.bin'
             )
           }
           for (const tex of result.textures ?? []) {

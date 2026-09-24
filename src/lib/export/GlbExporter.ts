@@ -97,6 +97,7 @@ function buildGltfJson(
   useShortIndices: boolean,
   mode: 'glb' | 'gltf',
   axisConvention?: string,
+  bufferUri?: string,
 ): object {
   const vertexCount = mesh.positions.length / 3;
   const indexCount = mesh.indices.length;
@@ -278,7 +279,11 @@ function buildGltfJson(
     ],
     accessors,
     bufferViews,
-    buffers: [{ byteLength: totalBinLength }],
+    buffers: [
+      mode === 'gltf'
+        ? { uri: bufferUri ?? 'geometry.bin', byteLength: totalBinLength }
+        : { byteLength: totalBinLength },
+    ],
   };
 }
 
@@ -423,7 +428,7 @@ export async function exportGltf(
   options: ExportOptions,
   albedoImage?: Blob,
   maps?: { normal?: Blob; ao?: Blob; roughness?: Blob; height?: Blob },
-): Promise<{ json: object; bin: ArrayBuffer; textures: Map<string, Blob> }> {
+): Promise<{ json: object; bin: ArrayBuffer; binName: string; textures: Map<string, Blob> }> {
   const vertexCount = mesh.positions.length / 3;
   const useShortIndices = vertexCount < 65536;
 
@@ -503,6 +508,7 @@ export async function exportGltf(
     useShortIndices,
     'gltf',
     options.axisConvention,
+    'geometry.bin',
   );
 
   // Update the buffer byteLength in the JSON to match the geometry buffer
@@ -511,5 +517,5 @@ export async function exportGltf(
   };
   gltfJson.buffers[0].byteLength = geometryBytes;
 
-  return { json, bin: binBuffer, textures };
+  return { json, bin: binBuffer, binName: 'geometry.bin', textures };
 }
