@@ -53,6 +53,13 @@ function readUint24LE(bytes: Uint8Array, offset: number): number {
   return bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16);
 }
 
+function sniffImageType(bytes: Uint8Array): string | null {
+  if (bytes.length >= 8 && [137, 80, 78, 71, 13, 10, 26, 10].every((value, index) => bytes[index] === value)) return 'image/png';
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (bytes.length >= 12 && String.fromCharCode(...bytes.slice(0, 4)) === 'RIFF' && String.fromCharCode(...bytes.slice(8, 12)) === 'WEBP') return 'image/webp';
+  return null;
+}
+
 function inspectImageDimensions(bytes: Uint8Array, type: string): ImageDimensions | null {
   if (type === 'image/png' && bytes.length >= 24) {
     const signature = [137, 80, 78, 71, 13, 10, 26, 10];
@@ -226,9 +233,14 @@ let operationGeneration = 0;
 let saveRevision = 0;
 let saveQueue: Promise<void> = Promise.resolve();
 
-function invalidateOperations(): number {
+function advanceOperationGeneration(): number {
   operationGeneration += 1;
   saveRevision += 1;
+  return operationGeneration;
+}
+
+function invalidateOperations(): number {
+  advanceOperationGeneration();
   clearMeshDebounce();
   clearReliefDebounce();
   clearPreviewMapDebounce();
@@ -1183,6 +1195,7 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   setResolution: (res: number) => {
+    invalidateOperations();
     set({ resolution: res });
     const state = get();
     if (state.depthResult) {
@@ -1192,6 +1205,7 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   setDepthScale: (scale: number) => {
+    invalidateOperations();
     set({ depthScale: scale });
     if (get().depthResult) {
       set({ isProcessing: true, processingMessage: 'Rebuilding mesh...' });
@@ -1200,6 +1214,7 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   setSmoothing: (s: number) => {
+    invalidateOperations();
     set({ smoothing: s });
     if (get().depthResult) {
       set({ isProcessing: true, processingMessage: 'Rebuilding mesh...' });
@@ -1247,6 +1262,7 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   setMeshParams: (p: Partial<MeshParams>) => {
+    invalidateOperations();
     set((s) => ({ mesh: { ...s.mesh, ...p } }));
     const state = get();
     if (state.depthResult) {
@@ -1256,6 +1272,8 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   setMapParams: (p: Partial<MapParams>) => {
+    advanceOperationGeneration();
+    disposePreviewMapWorker();
     set((s) => ({
       maps: {
         ...s.maps,
@@ -1269,16 +1287,28 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   setTilingParams: (p: Partial<TilingParams>) => {
+    advanceOperationGeneration();
     set((s) => ({ tiling: { ...s.tiling, ...p } }));
   },
 
   setUnitParams: (p: Partial<UnitParams>) => {
+    advanceOperationGeneration();
     set((s) => ({ units: { ...s.units, ...p } }));
   },
 
-  setAxisConvention: (a: AxisConvention) => set({ axisConvention: a }),
-  setProjectName: (name: string) => set({ projectName: name }),
-  setMaterialMode: (m: MaterialMode) => set({ materialMode: m }),
+  setAxisConvention: (a: AxisConvention) => {
+    advanceOperationGeneration();
+    set({ axisConvention: a });
+  },
+  setProjectName: (name: string) => {
+    advanceOperationGeneration();
+    set({ projectName: name });
+  },
+  setMaterialMode: (m: MaterialMode) => {
+    advanceOperationGeneration();
+    disposePreviewMapWorker();
+    set({ materialMode: m });
+  },
   setLeftPanelOpen: (v: boolean) => set({ leftPanelOpen: v }),
   setRightPanelOpen: (v: boolean) => set({ rightPanelOpen: v }),
   setExportDialogOpen: (v: boolean) => set({ exportDialogOpen: v }),
@@ -1420,6 +1450,7 @@ export const useStore = create<StoreState>((set, get) => ({
     let imageUrl: string | null = null;
     let imageBlob: Blob | undefined = project.imageBlob;
     let migrated = project.imageDataBase64 !== undefined;
+    let imageValidated = false;
     let loadError: string | null = null;
 
     if (!imageBlob && project.imageDataBase64) {
@@ -1433,8 +1464,9 @@ export const useStore = create<StoreState>((set, get) => ({
 
     if (imageBlob) {
       try {
-        const imageType = imageBlob.type || (project.imageName?.toLowerCase().endsWith('.jpg') || project.imageName?.toLowerCase().endsWith('.jpeg') ? 'image/jpeg' : 'image/png');
         const imageBytes = new Uint8Array(await imageBlob.arrayBuffer());
+        const sniffedType = sniffImageType(imageBytes);
+        const imageType = sniffedType ?? imageBlob.type ?? (project.imageName?.toLowerCase().endsWith('.jpg') || project.imageName?.toLowerCase().endsWith('.jpeg') ? 'image/jpeg' : 'image/png');
         const dimensions = inspectImageDimensions(imageBytes, imageType);
         if (!dimensions) throw new Error('Saved project image has an unsupported format.');
         if (dimensions.width > MAX_INPUT_DIMENSION || dimensions.height > MAX_INPUT_DIMENSION) {
@@ -1447,6 +1479,7 @@ export const useStore = create<StoreState>((set, get) => ({
         );
         imageUrl = URL.createObjectURL(imageBlob);
         imageBitmap = await createImageBitmap(imageBlob);
+        imageValidated = true;
         if (generation !== operationGeneration) {
           imageBitmap.close();
           URL.revokeObjectURL(imageUrl);
@@ -1481,11 +1514,12 @@ export const useStore = create<StoreState>((set, get) => ({
       }
     }
 
-    if (migrated) {
+    const canMigrateImage = !project.imageDataBase64 || imageValidated;
+    if (migrated && canMigrateImage) {
       const upgraded: ProjectData = {
         ...project,
         imageBlob,
-        imageDataBase64: undefined,
+        imageDataBase64: imageValidated ? undefined : project.imageDataBase64,
         depthCache: project.depthCache && depthResult
           ? {
               width: depthResult.width,
