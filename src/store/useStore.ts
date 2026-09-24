@@ -97,7 +97,7 @@ interface StoreState {
 
   // Actions
   loadImage: (file: File) => Promise<void>;
-  setMode: (mode: Mode) => void;
+  setMode: (mode: Mode) => Promise<void>;
   setResolution: (res: number) => void;
   setDepthScale: (scale: number) => void;
   setSmoothing: (s: number) => void;
@@ -126,6 +126,7 @@ interface StoreState {
 }
 
 let meshWorker: Worker | null = null;
+let depthWorker: Worker | null = null;
 let errorTimeout: ReturnType<typeof setTimeout> | null = null;
 
 function getMeshWorker(): Worker {
@@ -136,6 +137,32 @@ function getMeshWorker(): Worker {
     );
   }
   return meshWorker;
+}
+
+function getDepthWorker(): Worker {
+  if (!depthWorker) {
+    depthWorker = new Worker(
+      new URL('../workers/depth/depth.worker.ts', import.meta.url),
+      { type: 'module' }
+    );
+  }
+  return depthWorker;
+}
+
+async function detectCapability(): Promise<DeviceCapability> {
+  const nav = navigator as Navigator & { gpu?: { requestAdapter: () => Promise<unknown> } };
+  if (typeof navigator === 'undefined' || !nav.gpu) {
+    return 'wasm';
+  }
+  try {
+    const adapter = await nav.gpu!.requestAdapter();
+    if (adapter) {
+      return 'webgpu';
+    }
+  } catch {
+    // Fall through to wasm
+  }
+  return 'wasm';
 }
 
 function extractHeightmap(bitmap: ImageBitmap, source: 'luma' | 'invLuma' | 'alpha'): Float32Array {
@@ -170,6 +197,70 @@ function extractHeightmap(bitmap: ImageBitmap, source: 'luma' | 'invLuma' | 'alp
 
 type SetState = StoreState | Partial<StoreState> | ((s: StoreState) => StoreState | Partial<StoreState>);
 type GetState = () => StoreState;
+
+function requestDepthEstimation(
+  bitmap: ImageBitmap,
+  invert: boolean,
+  state: StoreState,
+  set: (partial: SetState) => void,
+) {
+  const worker = getDepthWorker();
+  const id = crypto.randomUUID();
+
+  // Initialize the depth worker if not already done
+  worker.postMessage({ type: 'init' });
+
+  const onMessage = async (e: MessageEvent) => {
+    const data = e.data;
+    if (data.type === 'init-result') {
+      if (data.success) {
+        // Worker initialized successfully, now send the image for estimation
+        const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+        const ctx = canvas.getContext('2d')!;
+        ctx.drawImage(bitmap, 0, 0);
+        const imageData = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
+        
+        worker.postMessage({
+          type: 'estimate',
+          id,
+          imageData: {
+            width: bitmap.width,
+            height: bitmap.height,
+            data: imageData.data.buffer,
+          },
+          invert,
+        });
+      } else {
+        worker.removeEventListener('message', onMessage);
+        set({
+          isProcessing: false,
+          processingMessage: '',
+          error: data.error || 'Failed to initialize depth estimation',
+          capability: data.device as DeviceCapability,
+        });
+      }
+    } else if (data.type === 'depth-result' && data.id === id) {
+      worker.removeEventListener('message', onMessage);
+      const depth: DepthResult = {
+        width: data.width,
+        height: data.height,
+        data: new Float32Array(data.data),
+      };
+      
+      set({ depthResult: depth, processingMessage: 'Building mesh...', capability: data.device as DeviceCapability });
+      requestMeshGeneration(depth.data, depth.width, depth.height, useStore.getState(), set);
+    } else if (data.type === 'error' && data.id === id) {
+      worker.removeEventListener('message', onMessage);
+      set({
+        isProcessing: false,
+        processingMessage: '',
+        error: data.error,
+      });
+    }
+  };
+
+  worker.addEventListener('message', onMessage);
+}
 
 function requestMeshGeneration(
   heights: Float32Array,
@@ -302,6 +393,9 @@ export const useStore = create<StoreState>((set, get) => ({
       await fetch(url).then((r) => r.blob())
     );
 
+    const state = get();
+    const cap = await detectCapability();
+
     set({
       image: file,
       imageUrl: url,
@@ -312,11 +406,10 @@ export const useStore = create<StoreState>((set, get) => ({
       meshResult: null,
       viewportInfo: null,
       isProcessing: true,
-      processingMessage: 'Generating heightmap...',
+      processingMessage: state.mode === 'ai' ? 'Initializing AI depth estimation...' : 'Generating heightmap...',
       error: null,
+      capability: cap,
     });
-
-    const state = get();
 
     if (state.mode === 'relief') {
       const heights = extractHeightmap(bitmap, state.relief.source);
@@ -330,14 +423,15 @@ export const useStore = create<StoreState>((set, get) => ({
       set({ depthResult: depth, processingMessage: 'Building mesh...' });
 
       requestMeshGeneration(heights, bitmap.width, bitmap.height, get(), set);
-    } else {
-      set({ isProcessing: false, processingMessage: '' });
+    } else if (state.mode === 'ai') {
+      requestDepthEstimation(bitmap, state.ai.invert, get(), set);
     }
   },
 
-  setMode: (mode: Mode) => {
-    set({ mode, isProcessing: true, processingMessage: 'Regenerating depth...' });
+  setMode: async (mode: Mode) => {
     const state = get();
+    const cap = await detectCapability();
+    set({ mode, isProcessing: true, processingMessage: mode === 'ai' ? 'Running AI depth estimation...' : 'Regenerating depth...', capability: cap });
 
     if (mode === 'relief' && state.imageBitmap) {
       const heights = extractHeightmap(state.imageBitmap, state.relief.source);
@@ -348,6 +442,8 @@ export const useStore = create<StoreState>((set, get) => ({
       };
       set({ depthResult: depth, processingMessage: 'Building mesh...' });
       requestMeshGeneration(heights, depth.width, depth.height, get(), set);
+    } else if (mode === 'ai' && state.imageBitmap) {
+      requestDepthEstimation(state.imageBitmap, state.ai.invert, get(), set);
     } else {
       set({ depthResult: null, meshResult: null, viewportInfo: null, isProcessing: false, processingMessage: '' });
     }
@@ -399,9 +495,16 @@ export const useStore = create<StoreState>((set, get) => ({
   setAiParams: (p: Partial<AiParams>) => {
     set((s) => ({ ai: { ...s.ai, ...p } }));
     const state = get();
-    if (state.mode === 'ai' && state.depthResult) {
-      set({ isProcessing: true, processingMessage: 'Rebuilding mesh...' });
-      requestMeshGeneration(state.depthResult.data, state.depthResult.width, state.depthResult.height, get(), set);
+    if (state.mode === 'ai' && state.imageBitmap) {
+      // If invert changed, re-run depth estimation
+      if (p.invert !== undefined && p.invert !== state.ai.invert) {
+        set({ isProcessing: true, processingMessage: 'Re-running AI depth estimation...' });
+        requestDepthEstimation(state.imageBitmap, p.invert, get(), set);
+      } else if (state.depthResult) {
+        // Otherwise just rebuild mesh
+        set({ isProcessing: true, processingMessage: 'Rebuilding mesh...' });
+        requestMeshGeneration(state.depthResult.data, state.depthResult.width, state.depthResult.height, get(), set);
+      }
     }
   },
 
@@ -574,9 +677,16 @@ export const useStore = create<StoreState>((set, get) => ({
       ...project.params,
     });
 
+    const cap = await detectCapability();
+    set({ capability: cap });
+
     if (depthResult) {
       set({ isProcessing: true, processingMessage: 'Building mesh...' });
       requestMeshGeneration(depthResult.data, depthResult.width, depthResult.height, get(), set);
+    } else if (project.params.mode === 'ai' && imageBitmap) {
+      // No cached depth for AI mode, need to re-run estimation
+      set({ isProcessing: true, processingMessage: 'Running AI depth estimation...' });
+      requestDepthEstimation(imageBitmap, project.params.ai.invert, get(), set);
     }
   },
 
