@@ -1,8 +1,89 @@
 /// <reference lib="webworker" />
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let pipeline: any = null;
+type Device = 'webgpu' | 'wasm' | 'none';
+
+type DepthPipeline = ((input: ImageBitmap) => Promise<{
+  depth: ImageData | HTMLCanvasElement;
+}>) & {
+  dispose?: () => Promise<void> | void;
+};
+
+type InitResult = {
+  success: boolean;
+  device: Device;
+  error?: string;
+};
+
+type WorkerMessage =
+  | { type: 'init' }
+  | {
+      type: 'estimate';
+      id: string;
+      image: ImageBitmap;
+      width: number;
+      height: number;
+      invert: boolean;
+    }
+  | { type: 'cancel'; id: string }
+  | { type: 'dispose' };
+
+let pipeline: DepthPipeline | null = null;
+let device: Device = 'none';
+let initialization: Promise<InitResult> | null = null;
 const cancelledIds = new Set<string>();
+
+async function loadPipeline(): Promise<InitResult> {
+  try {
+    const { pipeline: createPipeline } = await import('@huggingface/transformers');
+
+    try {
+      const candidate = await createPipeline(
+        'depth-estimation',
+        'depth-anything/Depth-Anything-V2-Small-hf',
+        { device: 'webgpu' },
+      );
+      pipeline = candidate as unknown as DepthPipeline;
+      device = 'webgpu';
+      return { success: true, device };
+    } catch (webgpuError) {
+      try {
+        const candidate = await createPipeline(
+          'depth-estimation',
+          'depth-anything/Depth-Anything-V2-Small-hf',
+          { device: 'wasm' },
+        );
+        pipeline = candidate as unknown as DepthPipeline;
+        device = 'wasm';
+        return { success: true, device };
+      } catch (wasmError) {
+        const message = wasmError instanceof Error ? wasmError.message : String(wasmError);
+        const webgpuMessage = webgpuError instanceof Error ? webgpuError.message : String(webgpuError);
+        return {
+          success: false,
+          device: 'none',
+          error: `WebGPU and WASM both failed. WebGPU: ${webgpuMessage}; WASM: ${message}`,
+        };
+      }
+    }
+  } catch (error) {
+    return {
+      success: false,
+      device: 'none',
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+async function initializePipeline(): Promise<InitResult> {
+  if (pipeline) return { success: true, device };
+  if (!initialization) {
+    initialization = loadPipeline().catch((error: unknown) => {
+      initialization = null;
+      throw error;
+    });
+  }
+  return initialization;
+}
 
 function bilinearResample(
   src: Float32Array,
@@ -42,132 +123,79 @@ function bilinearResample(
 }
 
 async function handleInit(): Promise<void> {
-  try {
-    const { pipeline: createPipeline } = await import("@huggingface/transformers");
-
-    let device = "webgpu";
-    try {
-      pipeline = await createPipeline(
-        "depth-estimation",
-        "depth-anything/Depth-Anything-V2-Small-hf",
-        { device: "webgpu" },
-      );
-    } catch {
-      device = "wasm";
-      try {
-        pipeline = await createPipeline(
-          "depth-estimation",
-          "depth-anything/Depth-Anything-V2-Small-hf",
-          { device: "wasm" },
-        );
-      } catch (wasmError) {
-        postMessage({
-          type: "init-result",
-          success: false,
-          device: "none",
-          error: `WebGPU and WASM both failed. WASM error: ${wasmError instanceof Error ? wasmError.message : String(wasmError)}`,
-        });
-        return;
-      }
-    }
-
-    postMessage({ type: "init-result", success: true, device });
-  } catch (err) {
-    postMessage({
-      type: "init-result",
-      success: false,
-      device: "none",
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
+  const result = await initializePipeline();
+  self.postMessage({ type: 'init-result', ...result });
 }
 
 async function handleEstimate(
   id: string,
-  imageData: { width: number; height: number; data: ArrayBuffer },
+  image: ImageBitmap,
+  targetW: number,
+  targetH: number,
   invert: boolean,
 ): Promise<void> {
   if (!pipeline) {
-    postMessage({ type: "error", id, error: "Pipeline not initialized" });
+    image.close();
+    self.postMessage({ type: 'error', id, error: 'Pipeline not initialized' });
     return;
   }
 
   if (cancelledIds.has(id)) {
     cancelledIds.delete(id);
+    image.close();
     return;
   }
 
   try {
-    const pixels = new Uint8ClampedArray(imageData.data);
-    const srcImageData = new ImageData(pixels, imageData.width, imageData.height);
-    const bitmap = await createImageBitmap(srcImageData);
+    const result = await pipeline(image);
+    image.close();
 
-    const result = await pipeline(bitmap);
-    bitmap.close();
+    if (cancelledIds.delete(id)) return;
 
-    if (cancelledIds.has(id)) {
-      cancelledIds.delete(id);
-      return;
-    }
-
-    const depthData: ImageData | HTMLCanvasElement = result.depth;
-
+    const depthData = result.depth;
     let depthPixels: Uint8ClampedArray;
     let modelW: number;
     let modelH: number;
 
     if (depthData instanceof HTMLCanvasElement) {
-      const ctx = depthData.getContext("2d")!;
+      const ctx = depthData.getContext('2d');
+      if (!ctx) throw new Error('Depth model returned a canvas without a 2D context');
       modelW = depthData.width;
       modelH = depthData.height;
       depthPixels = ctx.getImageData(0, 0, modelW, modelH).data;
     } else {
-      modelW = (depthData as ImageData).width;
-      modelH = (depthData as ImageData).height;
-      depthPixels = (depthData as ImageData).data;
+      modelW = depthData.width;
+      modelH = depthData.height;
+      depthPixels = depthData.data;
     }
 
-    const targetW = imageData.width;
-    const targetH = imageData.height;
-
-    let normalized: Float32Array;
     const pixelCount = modelW * modelH;
+    const normalized = new Float32Array(pixelCount);
+    const rgba = depthPixels.length === pixelCount * 4;
 
-    if (depthPixels.length === pixelCount) {
-      normalized = new Float32Array(pixelCount);
-      for (let i = 0; i < pixelCount; i++) {
-        normalized[i] = depthPixels[i] / 255;
-      }
-    } else {
-      normalized = new Float32Array(pixelCount);
-      for (let i = 0; i < pixelCount; i++) {
-        normalized[i] = depthPixels[i * 4] / 255;
-      }
+    for (let i = 0; i < pixelCount; i++) {
+      const value = depthPixels[rgba ? i * 4 : i] / 255;
+      normalized[i] = invert ? 1 - value : value;
     }
 
-    if (invert) {
-      for (let i = 0; i < normalized.length; i++) {
-        normalized[i] = 1.0 - normalized[i];
-      }
-    }
+    const resampled =
+      modelW === targetW && modelH === targetH
+        ? normalized
+        : bilinearResample(normalized, modelW, modelH, targetW, targetH);
 
-    let resampled: Float32Array;
-    if (modelW === targetW && modelH === targetH) {
-      resampled = normalized;
-    } else {
-      resampled = bilinearResample(normalized, modelW, modelH, targetW, targetH);
-    }
+    if (cancelledIds.delete(id)) return;
 
-    const buffer = resampled.buffer;
-    postMessage(
-      { type: "depth-result", id, width: targetW, height: targetH, data: buffer },
-      [buffer],
+    self.postMessage(
+      { type: 'depth-result', id, width: targetW, height: targetH, data: resampled.buffer, device },
+      [resampled.buffer],
     );
-  } catch (err) {
-    postMessage({
-      type: "error",
+  } catch (error) {
+    image.close();
+    if (cancelledIds.delete(id)) return;
+    self.postMessage({
+      type: 'error',
       id,
-      error: err instanceof Error ? err.message : String(err),
+      error: error instanceof Error ? error.message : String(error),
     });
   }
 }
@@ -176,33 +204,32 @@ function handleCancel(id: string): void {
   cancelledIds.add(id);
 }
 
-function handleDispose(): void {
-  if (pipeline) {
-    pipeline.dispose();
-    pipeline = null;
+async function handleDispose(): Promise<void> {
+  if (pipeline?.dispose) {
+    await pipeline.dispose();
   }
+  pipeline = null;
+  device = 'none';
+  initialization = null;
   cancelledIds.clear();
-  postMessage({ type: "disposed" });
+  self.postMessage({ type: 'disposed' });
 }
 
-self.onmessage = async (event: MessageEvent) => {
-  const msg = event.data;
+self.onmessage = (event: MessageEvent<WorkerMessage>) => {
+  const message = event.data;
 
-  switch (msg.type) {
-    case "init":
-      await handleInit();
+  switch (message.type) {
+    case 'init':
+      void handleInit();
       break;
-
-    case "estimate":
-      await handleEstimate(msg.id, msg.imageData, msg.invert);
+    case 'estimate':
+      void handleEstimate(message.id, message.image, message.width, message.height, message.invert);
       break;
-
-    case "cancel":
-      handleCancel(msg.id);
+    case 'cancel':
+      handleCancel(message.id);
       break;
-
-    case "dispose":
-      handleDispose();
+    case 'dispose':
+      void handleDispose();
       break;
   }
 };
