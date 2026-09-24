@@ -230,12 +230,19 @@ let reliefDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let previewMapDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let errorTimeout: ReturnType<typeof setTimeout> | null = null;
 let operationGeneration = 0;
+let exportRevision = 0;
 let saveRevision = 0;
 let saveQueue: Promise<void> = Promise.resolve();
+
+function advanceExportRevision(): number {
+  exportRevision += 1;
+  return exportRevision;
+}
 
 function advanceOperationGeneration(): number {
   operationGeneration += 1;
   saveRevision += 1;
+  advanceExportRevision();
   return operationGeneration;
 }
 
@@ -1195,6 +1202,10 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   setResolution: (res: number) => {
+    if (!get().depthResult) {
+      set({ resolution: res });
+      return;
+    }
     invalidateOperations();
     set({ resolution: res });
     const state = get();
@@ -1205,6 +1216,10 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   setDepthScale: (scale: number) => {
+    if (!get().depthResult) {
+      set({ depthScale: scale });
+      return;
+    }
     invalidateOperations();
     set({ depthScale: scale });
     if (get().depthResult) {
@@ -1214,6 +1229,10 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   setSmoothing: (s: number) => {
+    if (!get().depthResult) {
+      set({ smoothing: s });
+      return;
+    }
     invalidateOperations();
     set({ smoothing: s });
     if (get().depthResult) {
@@ -1223,9 +1242,10 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   setReliefParams: (p: Partial<ReliefParams>) => {
-    invalidateOperations();
+    const hasReliefSource = get().mode === 'relief' && Boolean(get().imageBitmap);
+    if (hasReliefSource) invalidateOperations();
     set((s) => ({ relief: { ...s.relief, ...p } }));
-    if (get().mode === 'relief' && get().imageBitmap) {
+    if (hasReliefSource) {
       set({
         depthResult: null,
         meshResult: null,
@@ -1262,6 +1282,10 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   setMeshParams: (p: Partial<MeshParams>) => {
+    if (!get().depthResult) {
+      set((s) => ({ mesh: { ...s.mesh, ...p } }));
+      return;
+    }
     invalidateOperations();
     set((s) => ({ mesh: { ...s.mesh, ...p } }));
     const state = get();
@@ -1272,7 +1296,7 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   setMapParams: (p: Partial<MapParams>) => {
-    advanceOperationGeneration();
+    advanceExportRevision();
     disposePreviewMapWorker();
     set((s) => ({
       maps: {
@@ -1287,25 +1311,25 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   setTilingParams: (p: Partial<TilingParams>) => {
-    advanceOperationGeneration();
+    advanceExportRevision();
     set((s) => ({ tiling: { ...s.tiling, ...p } }));
   },
 
   setUnitParams: (p: Partial<UnitParams>) => {
-    advanceOperationGeneration();
+    advanceExportRevision();
     set((s) => ({ units: { ...s.units, ...p } }));
   },
 
   setAxisConvention: (a: AxisConvention) => {
-    advanceOperationGeneration();
+    advanceExportRevision();
     set({ axisConvention: a });
   },
   setProjectName: (name: string) => {
-    advanceOperationGeneration();
+    advanceExportRevision();
     set({ projectName: name });
   },
   setMaterialMode: (m: MaterialMode) => {
-    advanceOperationGeneration();
+    advanceExportRevision();
     disposePreviewMapWorker();
     set({ materialMode: m });
   },
@@ -1328,7 +1352,7 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   setProcessing: (v: boolean, msg?: string) => set({ isProcessing: v, processingMessage: msg ?? '' }),
-  getOperationGeneration: () => operationGeneration,
+  getOperationGeneration: () => exportRevision,
 
   setError: (e: string | null) => {
     set({ error: e });
@@ -1437,11 +1461,31 @@ export const useStore = create<StoreState>((set, get) => ({
 
   loadProject: async (id: string) => {
     const generation = invalidateOperations();
+    const loadRevision = saveRevision;
+    set({ isProcessing: true, processingMessage: 'Loading project...', error: null });
     await saveQueue;
     if (generation !== operationGeneration) return;
-    const db = await getDB();
-    const project = (await db.get(STORE_NAME, id)) as ProjectData | undefined;
-    if (!project || generation !== operationGeneration) return;
+
+    let project: ProjectData | undefined;
+    try {
+      const db = await getDB();
+      project = (await db.get(STORE_NAME, id)) as ProjectData | undefined;
+    } catch (error) {
+      if (generation === operationGeneration) {
+        set({
+          isProcessing: false,
+          processingMessage: '',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      return;
+    }
+    if (!project || generation !== operationGeneration) {
+      if (generation === operationGeneration) {
+        set({ isProcessing: false, processingMessage: '', error: 'Project not found.' });
+      }
+      return;
+    }
 
     const s = get();
 
@@ -1480,7 +1524,7 @@ export const useStore = create<StoreState>((set, get) => ({
         imageUrl = URL.createObjectURL(imageBlob);
         imageBitmap = await createImageBitmap(imageBlob);
         imageValidated = true;
-        if (generation !== operationGeneration) {
+        if (generation !== operationGeneration || saveRevision !== loadRevision) {
           imageBitmap.close();
           URL.revokeObjectURL(imageUrl);
           return;
@@ -1528,7 +1572,7 @@ export const useStore = create<StoreState>((set, get) => ({
             }
           : undefined,
       };
-      const migrationRevision = saveRevision;
+      const migrationRevision = loadRevision;
       const migrationWrite = saveQueue.then(async () => {
         if (generation !== operationGeneration || migrationRevision !== saveRevision) return;
         const migrationDb = await getDB();
@@ -1541,7 +1585,7 @@ export const useStore = create<StoreState>((set, get) => ({
       } catch (error) {
         loadError = error instanceof Error ? error.message : 'Project migration could not be saved';
       }
-      if (generation !== operationGeneration) {
+      if (generation !== operationGeneration || saveRevision !== loadRevision) {
         imageBitmap?.close();
         if (imageUrl) URL.revokeObjectURL(imageUrl);
         return;
