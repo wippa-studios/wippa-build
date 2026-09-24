@@ -51,6 +51,24 @@ export function applyReliefSource(
   }
 }
 
+export function createHeightmapFromImageData(
+  imageData: ImageData,
+  source: ReliefSource,
+  gamma: number,
+  contrast: number,
+  smoothing = 0,
+): Float32Array {
+  let heights = applyReliefSource(
+    imageData.data,
+    imageData.width,
+    imageData.height,
+    source,
+  );
+  heights = applyGamma(heights, gamma);
+  heights = applyContrast(heights, contrast);
+  return gaussianBlur(heights, imageData.width, imageData.height, smoothing);
+}
+
 export function normalizeHeights(heights: Float32Array): Float32Array {
   const len = heights.length;
   let min = Infinity;

@@ -1,6 +1,6 @@
-import type { MapType, MeshBuildInput, MeshBuildResult } from '../../types';
+import type { MapType, MeshBuildInput, MeshBuildResult, ReliefSource } from '../../types';
 import { buildPlaneMesh, buildPlateMesh } from '../../lib/mesh/MeshBuilder';
-import { gaussianBlur } from '../../lib/mesh/HeightMap';
+import { createHeightmapFromImageData, gaussianBlur } from '../../lib/mesh/HeightMap';
 import { bakeMap } from '../../lib/maps/MapBaker';
 
 type MapRequest = {
@@ -11,6 +11,14 @@ type MapRequest = {
 
 type WorkerMessage =
   | { type: 'build-mesh'; id: string; input: MeshBuildInput }
+  | {
+      type: 'extract-heightmap';
+      id: string;
+      image: ImageBitmap;
+      source: ReliefSource;
+      gamma: number;
+      contrast: number;
+    }
   | {
       type: 'build-maps';
       id: string;
@@ -50,6 +58,41 @@ self.onmessage = (event: MessageEvent<WorkerMessage>) => {
         if (cancelled.delete(id)) break;
         self.postMessage({ type: 'mesh-result', id, result });
       } catch (error) {
+        if (cancelled.delete(id)) break;
+        self.postMessage({
+          type: 'error',
+          id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      break;
+    }
+
+    case 'extract-heightmap': {
+      const { id, image, source, gamma, contrast } = message;
+      if (cancelled.delete(id)) {
+        image.close();
+        break;
+      }
+
+      try {
+        const width = image.width;
+        const height = image.height;
+        const canvas = new OffscreenCanvas(width, height);
+        const ctx = canvas.getContext('2d');
+        if (!ctx) throw new Error('Failed to get 2D context for heightmap extraction');
+        ctx.drawImage(image, 0, 0);
+        const imageData = ctx.getImageData(0, 0, width, height);
+        const heights = createHeightmapFromImageData(imageData, source, gamma, contrast);
+        image.close();
+
+        if (cancelled.delete(id)) break;
+        self.postMessage(
+          { type: 'heightmap-result', id, width, height, data: heights.buffer },
+          [heights.buffer],
+        );
+      } catch (error) {
+        image.close();
         if (cancelled.delete(id)) break;
         self.postMessage({
           type: 'error',

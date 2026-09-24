@@ -144,6 +144,8 @@ let activeDepthRequestId: string | null = null;
 let activeDepthEstimatePosted = false;
 let activePreviewMapId: string | null = null;
 let activePreviewMapPosted = false;
+let activeHeightmapRequestId: string | null = null;
+let activeHeightmapPosted = false;
 let errorTimeout: ReturnType<typeof setTimeout> | null = null;
 
 function getMeshWorker(): Worker {
@@ -187,36 +189,6 @@ async function detectCapability(): Promise<DeviceCapability> {
   }
 
   return typeof WebAssembly === 'undefined' ? 'unavailable' : 'wasm';
-}
-
-function extractHeightmap(bitmap: ImageBitmap, source: 'luma' | 'invLuma' | 'alpha'): Float32Array {
-  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
-  const ctx = canvas.getContext('2d')!;
-  ctx.drawImage(bitmap, 0, 0);
-  const imageData = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
-  const pixels = imageData.data;
-  const w = bitmap.width;
-  const h = bitmap.height;
-  const result = new Float32Array(w * h);
-
-  for (let i = 0; i < w * h; i++) {
-    const r = pixels[i * 4];
-    const g = pixels[i * 4 + 1];
-    const b = pixels[i * 4 + 2];
-    const a = pixels[i * 4 + 3];
-    let value: number;
-
-    if (source === 'alpha') {
-      value = a / 255;
-    } else {
-      value = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-      if (source === 'invLuma') value = 1 - value;
-    }
-
-    result[i] = value;
-  }
-
-  return result;
 }
 
 type SetState = StoreState | Partial<StoreState> | ((s: StoreState) => StoreState | Partial<StoreState>);
@@ -367,6 +339,96 @@ function requestDepthEstimation(
         width: bitmap.width,
         height: bitmap.height,
         invert,
+      },
+      [image],
+    );
+  })();
+}
+
+function cancelHeightmapExtraction(worker: Worker): void {
+  if (activeHeightmapRequestId && activeHeightmapPosted) {
+    worker.postMessage({ type: 'cancel', id: activeHeightmapRequestId });
+  }
+  activeHeightmapRequestId = null;
+  activeHeightmapPosted = false;
+}
+
+function requestHeightmapExtraction(
+  bitmap: ImageBitmap,
+  relief: ReliefParams,
+  set: (partial: SetState) => void,
+): void {
+  const worker = getMeshWorker();
+  cancelHeightmapExtraction(worker);
+
+  const id = crypto.randomUUID();
+  activeHeightmapRequestId = id;
+
+  void (async () => {
+    let image: ImageBitmap;
+    try {
+      image = await createImageBitmap(bitmap);
+    } catch (error) {
+      if (activeHeightmapRequestId === id) {
+        activeHeightmapRequestId = null;
+        activeHeightmapPosted = false;
+        set({
+          isProcessing: false,
+          processingMessage: '',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      return;
+    }
+
+    if (activeHeightmapRequestId !== id) {
+      image.close();
+      return;
+    }
+
+    const onMessage = (event: MessageEvent) => {
+      const data = event.data;
+      if (data.type === 'heightmap-result' && data.id === id) {
+        cleanup();
+        if (activeHeightmapRequestId !== id) return;
+
+        activeHeightmapRequestId = null;
+        activeHeightmapPosted = false;
+        const depth: DepthResult = {
+          width: data.width,
+          height: data.height,
+          data: new Float32Array(data.data),
+        };
+        set({ depthResult: depth, processingMessage: 'Building mesh...', previewMaps: {} });
+        requestMeshGeneration(depth.data, depth.width, depth.height, useStore.getState(), set);
+      } else if (data.type === 'error' && data.id === id) {
+        cleanup();
+        if (activeHeightmapRequestId !== id) return;
+
+        activeHeightmapRequestId = null;
+        activeHeightmapPosted = false;
+        set({
+          isProcessing: false,
+          processingMessage: '',
+          error: data.error,
+        });
+      }
+    };
+
+    const cleanup = () => {
+      worker.removeEventListener('message', onMessage);
+    };
+
+    worker.addEventListener('message', onMessage);
+    activeHeightmapPosted = true;
+    worker.postMessage(
+      {
+        type: 'extract-heightmap',
+        id,
+        image,
+        source: relief.source,
+        gamma: relief.gamma,
+        contrast: relief.contrast,
       },
       [image],
     );
@@ -674,7 +736,10 @@ export const useStore = create<StoreState>((set, get) => ({
   // Actions
   loadImage: async (file: File) => {
     if (depthWorker) cancelDepthEstimation(depthWorker);
-    if (meshWorker) cancelPreviewMapGeneration(meshWorker);
+    if (meshWorker) {
+      cancelPreviewMapGeneration(meshWorker);
+      cancelHeightmapExtraction(meshWorker);
+    }
     const previous = get();
     const url = URL.createObjectURL(file);
     const bitmap = await createImageBitmap(
@@ -703,17 +768,7 @@ export const useStore = create<StoreState>((set, get) => ({
     });
 
     if (state.mode === 'relief') {
-      const heights = extractHeightmap(bitmap, state.relief.source);
-
-      const depth: DepthResult = {
-        width: bitmap.width,
-        height: bitmap.height,
-        data: heights,
-      };
-
-      set({ depthResult: depth, processingMessage: 'Building mesh...' });
-
-      requestMeshGeneration(heights, bitmap.width, bitmap.height, get(), set);
+      requestHeightmapExtraction(bitmap, state.relief, set);
     } else if (state.mode === 'ai') {
       requestDepthEstimation(bitmap, state.ai.invert, set);
     }
@@ -721,20 +776,16 @@ export const useStore = create<StoreState>((set, get) => ({
 
   setMode: async (mode: Mode) => {
     if (depthWorker) cancelDepthEstimation(depthWorker);
-    if (meshWorker) cancelPreviewMapGeneration(meshWorker);
+    if (meshWorker) {
+      cancelPreviewMapGeneration(meshWorker);
+      cancelHeightmapExtraction(meshWorker);
+    }
     const state = get();
     const cap = await detectCapability();
     set({ mode, isProcessing: true, processingMessage: mode === 'ai' ? 'Running AI depth estimation...' : 'Regenerating depth...', capability: cap });
 
     if (mode === 'relief' && state.imageBitmap) {
-      const heights = extractHeightmap(state.imageBitmap, state.relief.source);
-      const depth: DepthResult = {
-        width: state.imageBitmap.width,
-        height: state.imageBitmap.height,
-        data: heights,
-      };
-      set({ depthResult: depth, processingMessage: 'Building mesh...' });
-      requestMeshGeneration(heights, depth.width, depth.height, get(), set);
+      requestHeightmapExtraction(state.imageBitmap, state.relief, set);
     } else if (mode === 'ai' && state.imageBitmap) {
       requestDepthEstimation(state.imageBitmap, state.ai.invert, set);
     } else {
@@ -773,15 +824,8 @@ export const useStore = create<StoreState>((set, get) => ({
     set((s) => ({ relief: { ...s.relief, ...p } }));
     const state = get();
     if (state.mode === 'relief' && state.imageBitmap) {
-      set({ isProcessing: true, processingMessage: 'Regenerating...' });
-      const heights = extractHeightmap(state.imageBitmap, state.relief.source);
-      const depth: DepthResult = {
-        width: state.imageBitmap.width,
-        height: state.imageBitmap.height,
-        data: heights,
-      };
-      set({ depthResult: depth, processingMessage: 'Building mesh...' });
-      requestMeshGeneration(heights, depth.width, depth.height, get(), set);
+      set({ isProcessing: true, processingMessage: 'Regenerating heightmap...' });
+      requestHeightmapExtraction(state.imageBitmap, state.relief, set);
     }
   },
 
@@ -871,7 +915,10 @@ export const useStore = create<StoreState>((set, get) => ({
     const s = get();
     s.imageBitmap?.close();
     if (depthWorker) cancelDepthEstimation(depthWorker);
-    if (meshWorker) cancelPreviewMapGeneration(meshWorker);
+    if (meshWorker) {
+      cancelPreviewMapGeneration(meshWorker);
+      cancelHeightmapExtraction(meshWorker);
+    }
     if (s.imageUrl) URL.revokeObjectURL(s.imageUrl);
 
     if (errorTimeout) {
