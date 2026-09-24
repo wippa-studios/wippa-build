@@ -1,5 +1,6 @@
 import type { AxisConvention, MeshBuildResult } from '../../types';
 
+// MeshBuilder's canonical local space is X-right, Y-depth, Z-up.
 export function transformPosition(
   x: number,
   y: number,
@@ -7,24 +8,9 @@ export function transformPosition(
   axisConvention: AxisConvention,
   scale: number,
 ): [number, number, number] {
-  let tx = x * scale;
-  let ty = y * scale;
-  let tz = z * scale;
-
-  if (axisConvention === 'unity') {
-    const previousY = ty;
-    ty = tz;
-    tz = -previousY;
-  } else if (axisConvention === 'unreal') {
-    tx *= 100;
-    ty *= 100;
-    tz *= 100;
-    const previousY = ty;
-    ty = tz;
-    tz = -previousY;
-  }
-
-  return [tx, ty, tz];
+  if (axisConvention === 'gltf') return [x * scale, z * scale, y === 0 ? 0 : -y * scale];
+  if (axisConvention === 'unity') return [x * scale, z * scale, y * scale];
+  return [x * scale * 100, y * scale * 100, z * scale * 100];
 }
 
 export function transformNormal(
@@ -33,9 +19,9 @@ export function transformNormal(
   z: number,
   axisConvention: AxisConvention,
 ): [number, number, number] {
-  if (axisConvention === 'gltf') return [x, y, z];
-
-  return [x, z, -y];
+  if (axisConvention === 'gltf') return [x, z, -y];
+  if (axisConvention === 'unity') return [x, z, y];
+  return [x, y, z];
 }
 
 export function transformMesh(
@@ -43,8 +29,6 @@ export function transformMesh(
   axisConvention: AxisConvention,
   scale: number,
 ): MeshBuildResult {
-  if (axisConvention === 'gltf' && scale === 1) return mesh;
-
   const positions = new Float32Array(mesh.positions.length);
   const normals = new Float32Array(mesh.normals.length);
   const min: [number, number, number] = [Infinity, Infinity, Infinity];

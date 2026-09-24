@@ -26,6 +26,7 @@ export default function App() {
   return (
     <div className="flex flex-col h-screen bg-[var(--color-surface)]">
       <Header />
+      <ErrorBanner />
       <div className="flex flex-1 min-h-0">
         {leftPanelOpen && <LeftPanel />}
         <div
@@ -39,6 +40,30 @@ export default function App() {
         </div>
         {rightPanelOpen && <RightPanel />}
       </div>
+    </div>
+  )
+}
+
+function ErrorBanner() {
+  const error = useStore((s) => s.error)
+  const setError = useStore((s) => s.setError)
+
+  if (!error) return null
+
+  return (
+    <div
+      role="alert"
+      className="fixed top-3 left-1/2 z-[100] -translate-x-1/2 rounded-lg border border-red-500/30 bg-red-950/90 px-4 py-2 text-xs text-red-100 shadow-lg flex items-center gap-3"
+    >
+      <span>{error}</span>
+      <button
+        type="button"
+        onClick={() => setError(null)}
+        className="text-red-300 hover:text-white"
+        aria-label="Dismiss error"
+      >
+        ×
+      </button>
     </div>
   )
 }

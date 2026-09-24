@@ -1,54 +1,5 @@
 import type { MeshBuildResult, ExportOptions } from '../../types';
-
-function transformPosition(
-  x: number,
-  y: number,
-  z: number,
-  axisConvention: string,
-  scale: number,
-): [number, number, number] {
-  let tx = x * scale;
-  let ty = y * scale;
-  let tz = z * scale;
-
-  if (axisConvention === 'unity') {
-    const tmp = ty;
-    ty = tz;
-    tz = -tmp;
-  } else if (axisConvention === 'unreal') {
-    tx *= 100;
-    ty *= 100;
-    tz *= 100;
-    const tmp = ty;
-    ty = tz;
-    tz = -tmp;
-  }
-
-  return [tx, ty, tz];
-}
-
-function transformNormal(
-  x: number,
-  y: number,
-  z: number,
-  axisConvention: string,
-): [number, number, number] {
-  const nx = x;
-  let ny = y;
-  let nz = z;
-
-  if (axisConvention === 'unity') {
-    const tmp = ny;
-    ny = nz;
-    nz = -tmp;
-  } else if (axisConvention === 'unreal') {
-    const tmp = ny;
-    ny = nz;
-    nz = -tmp;
-  }
-
-  return [nx, ny, nz];
-}
+import { transformMesh } from './AxisTransform';
 
 export function exportObj(mesh: MeshBuildResult, materialName: string = 'material'): string {
   const lines: string[] = [];
@@ -133,54 +84,7 @@ export function exportObjWithMtl(
   textures: { albedo?: boolean; normal?: boolean } = {},
 ): { obj: string; mtl: string; mtlName: string } {
   const materialName = 'material';
-  const { axisConvention, scale } = options;
-
-  const transformed: MeshBuildResult = {
-    positions: new Float32Array(mesh.positions.length),
-    normals: new Float32Array(mesh.normals.length),
-    uvs: mesh.uvs,
-    indices: mesh.indices,
-    triangleCount: mesh.triangleCount,
-    bounds: {
-      min: [0, 0, 0],
-      max: [0, 0, 0],
-    },
-  };
-
-  const vertexCount = mesh.positions.length / 3;
-  const minPos: [number, number, number] = [Infinity, Infinity, Infinity];
-  const maxPos: [number, number, number] = [-Infinity, -Infinity, -Infinity];
-
-  for (let i = 0; i < vertexCount; i++) {
-    const px = mesh.positions[i * 3];
-    const py = mesh.positions[i * 3 + 1];
-    const pz = mesh.positions[i * 3 + 2];
-    const [tx, ty, tz] = transformPosition(px, py, pz, axisConvention, scale);
-    transformed.positions[i * 3] = tx;
-    transformed.positions[i * 3 + 1] = ty;
-    transformed.positions[i * 3 + 2] = tz;
-
-    if (tx < minPos[0]) minPos[0] = tx;
-    if (ty < minPos[1]) minPos[1] = ty;
-    if (tz < minPos[2]) minPos[2] = tz;
-    if (tx > maxPos[0]) maxPos[0] = tx;
-    if (ty > maxPos[1]) maxPos[1] = ty;
-    if (tz > maxPos[2]) maxPos[2] = tz;
-  }
-
-  for (let i = 0; i < vertexCount; i++) {
-    const nx = mesh.normals[i * 3];
-    const ny = mesh.normals[i * 3 + 1];
-    const nz = mesh.normals[i * 3 + 2];
-    const [tx, ty, tz] = transformNormal(nx, ny, nz, axisConvention);
-    transformed.normals[i * 3] = tx;
-    transformed.normals[i * 3 + 1] = ty;
-    transformed.normals[i * 3 + 2] = tz;
-  }
-
-  transformed.bounds.min = minPos;
-  transformed.bounds.max = maxPos;
-
+  const transformed = transformMesh(mesh, options.axisConvention, options.scale);
   const obj = exportObj(transformed, materialName);
   const mtl = exportMtl(materialName, textures);
 

@@ -159,7 +159,7 @@ function MeshScene() {
             metalness={0}
             normalScale={normalScale}
             displacementMap={pbrTextures.height}
-            displacementScale={0}
+            displacementScale={maps.height.enabled ? 0.01 : 0}
           />
         );
       case 'wire':

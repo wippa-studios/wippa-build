@@ -110,8 +110,11 @@ async function handleExport(msg: {
 }): Promise<WorkerResult> {
   const { id, mesh, options, maps } = msg;
   const format = options.format;
-  const mapsBlob = await convertMapsToBlobs(maps);
-  const albedoImage = msg.albedoImage ? await convertImageBlobToPng(msg.albedoImage) : undefined;
+  const needsTextureResources = format === 'glb' || (format === 'gltf' || format === 'obj') && options.includeTextures;
+  const mapsBlob = needsTextureResources ? await convertMapsToBlobs(maps) : undefined;
+  const albedoImage = needsTextureResources && msg.albedoImage
+    ? await convertImageBlobToPng(msg.albedoImage)
+    : undefined;
 
   switch (format) {
     case 'glb': {

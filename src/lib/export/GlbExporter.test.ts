@@ -31,7 +31,7 @@ describe('glTF exporters', () => {
     };
     expect(json.buffers[0].uri).toBe('geometry.bin');
     expect(json.buffers[0].byteLength).toBe(result.bin.byteLength);
-    expect(json.accessors[0].min).toEqual([0, 0, 0]);
+    expect(json.accessors[0].min).toEqual([0, 0, -1]);
     expect(new Float32Array(result.bin, 0, 3)).toEqual(new Float32Array([0, 0, 0]));
   });
 
@@ -46,8 +46,8 @@ describe('glTF exporters', () => {
       accessors: Array<{ min: number[]; max: number[] }>;
     };
     expect(json.buffers[0].uri).toBeUndefined();
-    expect(json.accessors[0].min).toEqual([0, 0, -1]);
-    expect(json.accessors[0].max).toEqual([1, 0, 0]);
+    expect(json.accessors[0].min).toEqual([0, 0, 0]);
+    expect(json.accessors[0].max).toEqual([1, 0, 1]);
   });
 
   it('rejects malformed geometry instead of emitting a misleading file', async () => {

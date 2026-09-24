@@ -17,6 +17,8 @@ export default function Header() {
   const projectName = useStore((s) => s.projectName)
   const materialMode = useStore((s) => s.materialMode)
   const image = useStore((s) => s.image)
+  const isProcessing = useStore((s) => s.isProcessing)
+  const depthResult = useStore((s) => s.depthResult)
   const leftPanelOpen = useStore((s) => s.leftPanelOpen)
   const rightPanelOpen = useStore((s) => s.rightPanelOpen)
   const setProjectName = useStore((s) => s.setProjectName)
@@ -26,10 +28,23 @@ export default function Header() {
   const setExportDialogOpen = useStore((s) => s.setExportDialogOpen)
   const clearProject = useStore((s) => s.clearProject)
   const saveProject = useStore((s) => s.saveProject)
+  const projects = useStore((s) => s.projects)
+  const listProjects = useStore((s) => s.listProjects)
+  const loadProject = useStore((s) => s.loadProject)
+  const deleteProject = useStore((s) => s.deleteProject)
+  const setError = useStore((s) => s.setError)
 
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(projectName)
   const inputRef = useRef<HTMLInputElement>(null)
+  const [showProjects, setShowProjects] = useState(false)
+
+  useEffect(() => {
+    if (!showProjects) return
+    void listProjects().catch((error: unknown) => {
+      setError(error instanceof Error ? error.message : String(error))
+    })
+  }, [listProjects, setError, showProjects])
 
   useEffect(() => {
     if (editing) {
@@ -149,7 +164,7 @@ export default function Header() {
       </div>
 
       {/* Right — actions */}
-      <div className="flex items-center gap-1.5">
+      <div className="relative flex items-center gap-1.5">
         <button
           onClick={() => clearProject()}
           className="px-2.5 py-1 rounded text-xs font-medium text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-surface-overlay)] transition-colors"
@@ -157,11 +172,52 @@ export default function Header() {
         >
           New
         </button>
+        <button
+          onClick={() => setShowProjects((open) => !open)}
+          className="px-2.5 py-1 rounded text-xs font-medium text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-surface-overlay)] transition-colors"
+          aria-label="Open project"
+          aria-expanded={showProjects}
+        >
+          Open
+        </button>
+        {showProjects && (
+          <div className="absolute right-0 top-9 z-50 w-64 max-h-72 overflow-y-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-2 shadow-xl">
+            {projects.length === 0 ? (
+              <p className="px-2 py-3 text-xs text-[var(--color-text-muted)]">No saved projects</p>
+            ) : (
+              projects.map((project) => (
+                <div key={project.id} className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowProjects(false)
+                      void loadProject(project.id).catch((error: unknown) => {
+                        setError(error instanceof Error ? error.message : String(error))
+                      })
+                    }}
+                    className="min-w-0 flex-1 truncate rounded px-2 py-2 text-left text-xs text-[var(--color-text)] hover:bg-[var(--color-surface-overlay)]"
+                  >
+                    {project.name}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void deleteProject(project.id)}
+                    className="rounded px-2 py-2 text-xs text-red-400 hover:bg-red-500/10"
+                    aria-label={`Delete ${project.name}`}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        )}
         {image && (
           <>
             <button
               onClick={() => saveProject()}
-              className="px-2.5 py-1 rounded text-xs font-medium text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-surface-overlay)] transition-colors"
+              disabled={isProcessing || !depthResult}
+              className="px-2.5 py-1 rounded text-xs font-medium text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-surface-overlay)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               aria-label="Save project"
             >
               Save

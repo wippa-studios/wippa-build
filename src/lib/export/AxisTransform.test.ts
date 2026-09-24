@@ -15,14 +15,14 @@ function mesh(): MeshBuildResult {
 
 describe('AxisTransform', () => {
   it('applies Unity and Unreal position/normal conventions', () => {
-    expect(transformPosition(1, 2, 3, 'unity', 2)).toEqual([2, 6, -4]);
-    expect(transformPosition(1, 2, 3, 'unreal', 1)).toEqual([100, 300, -200]);
-    expect(transformNormal(0, 1, 0, 'unity')).toEqual([0, 0, -1]);
+    expect(transformPosition(1, 2, 3, 'unity', 2)).toEqual([2, 6, 4]);
+    expect(transformPosition(1, 2, 3, 'unreal', 1)).toEqual([100, 200, 300]);
+    expect(transformNormal(0, 1, 0, 'unity')).toEqual([0, 0, 1]);
   });
 
-  it('keeps glTF identity transforms and returns matching bounds', () => {
+  it('converts the canonical Z-up mesh into glTF Y-up space', () => {
     const result = transformMesh(mesh(), 'gltf', 1);
-    expect(result.positions).toEqual(mesh().positions);
-    expect(result.bounds).toEqual({ min: [-1, 2, 3], max: [1, 4, 5] });
+    expect(result.positions).toEqual(new Float32Array([1, 3, -2, -1, 5, -4]));
+    expect(result.bounds).toEqual({ min: [-1, 3, -4], max: [1, 5, -2] });
   });
 });

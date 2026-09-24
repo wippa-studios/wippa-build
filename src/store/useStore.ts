@@ -164,9 +164,10 @@ function invalidateOperations(): number {
   clearPreviewMapDebounce();
   if (depthWorker) cancelDepthEstimation(depthWorker);
   if (previewMapWorker) disposePreviewMapWorker();
-  if (meshWorker) {
-    cancelHeightmapExtraction(meshWorker);
-    cancelMeshGeneration(meshWorker);
+  const currentMeshWorker = meshWorker;
+  if (currentMeshWorker) {
+    cancelHeightmapExtraction(currentMeshWorker);
+    if (meshWorker === currentMeshWorker) cancelMeshGeneration(currentMeshWorker);
   }
   return operationGeneration;
 }
@@ -413,7 +414,8 @@ function requestDepthEstimation(
 
 function cancelHeightmapExtraction(worker: Worker): void {
   if (activeHeightmapRequestId && activeHeightmapPosted) {
-    worker.postMessage({ type: 'cancel', id: activeHeightmapRequestId });
+    worker.terminate();
+    if (meshWorker === worker) meshWorker = null;
   }
   activeHeightmapRequestId = null;
   activeHeightmapPosted = false;
@@ -443,8 +445,8 @@ function requestHeightmapExtraction(
   set: (partial: SetState) => void,
   generation = operationGeneration,
 ): void {
+  if (meshWorker) cancelHeightmapExtraction(meshWorker);
   const worker = getMeshWorker();
-  cancelHeightmapExtraction(worker);
 
   const id = crypto.randomUUID();
   activeHeightmapRequestId = id;
@@ -539,7 +541,8 @@ function requestHeightmapExtraction(
 
 function cancelMeshGeneration(worker: Worker): void {
   if (activeMeshRequestId && activeMeshRequestPosted) {
-    worker.postMessage({ type: 'cancel', id: activeMeshRequestId });
+    worker.terminate();
+    if (meshWorker === worker) meshWorker = null;
   }
   activeMeshCleanup?.();
   activeMeshCleanup = null;
@@ -588,8 +591,8 @@ function requestMeshGeneration(
   generation = operationGeneration,
 ): void {
   clearMeshDebounce();
+  if (meshWorker) cancelMeshGeneration(meshWorker);
   const worker = getMeshWorker();
-  cancelMeshGeneration(worker);
   const id = crypto.randomUUID();
   activeMeshRequestId = id;
 
@@ -695,6 +698,15 @@ type PreviewMapRequest = {
   flipY?: boolean;
 };
 
+function getPreviewMapRequests(maps: MapParams): PreviewMapRequest[] {
+  const requests: PreviewMapRequest[] = [];
+  if (maps.normal.enabled) requests.push({ mapType: 'normal', strength: 1, flipY: maps.normal.flipY });
+  if (maps.ao.enabled) requests.push({ mapType: 'ao', strength: 1 });
+  if (maps.roughness.mode === 'fromLuma') requests.push({ mapType: 'roughness' });
+  if (maps.height.enabled) requests.push({ mapType: 'height' });
+  return requests;
+}
+
 function getMapRequests(maps: MapParams): PreviewMapRequest[] {
   const requests: PreviewMapRequest[] = [];
   if (maps.normal.enabled) {
@@ -744,7 +756,7 @@ function requestPreviewMaps(
   disposePreviewMapWorker();
   const worker = getPreviewMapWorker();
 
-  const requests = getMapRequests(maps);
+  const requests = getPreviewMapRequests(maps);
 
   if (requests.length === 0) {
     disposePreviewMapWorker();
@@ -809,9 +821,10 @@ function requestPreviewMaps(
   };
 
   const timeout = setTimeout(() => {
+    const wasCurrent = generation === operationGeneration && activePreviewMapId === id;
     cleanup();
     disposePreviewMapWorker();
-    if (generation === operationGeneration && activePreviewMapId === id) {
+    if (wasCurrent) {
       set({ previewMaps: {}, error: 'PBR preview maps timed out. Try a lower mesh resolution.' });
     }
   }, 120_000);
@@ -1071,7 +1084,15 @@ export const useStore = create<StoreState>((set, get) => ({
     const cap = await detectCapability();
     if (generation !== operationGeneration) return;
 
-    set({ mode, isProcessing: true, processingMessage: mode === 'ai' ? 'Running AI depth estimation...' : 'Regenerating depth...', capability: cap });
+    set({
+      mode,
+      depthResult: null,
+      meshResult: null,
+      viewportInfo: null,
+      isProcessing: true,
+      processingMessage: mode === 'ai' ? 'Running AI depth estimation...' : 'Regenerating depth...',
+      capability: cap,
+    });
 
     if (mode === 'relief' && state.imageBitmap) {
       requestHeightmapExtraction(state.imageBitmap, state.relief, set, generation);
@@ -1110,7 +1131,13 @@ export const useStore = create<StoreState>((set, get) => ({
   setReliefParams: (p: Partial<ReliefParams>) => {
     set((s) => ({ relief: { ...s.relief, ...p } }));
     if (get().mode === 'relief' && get().imageBitmap) {
-      set({ isProcessing: true, processingMessage: 'Regenerating heightmap...' });
+      set({
+        depthResult: null,
+        meshResult: null,
+        viewportInfo: null,
+        isProcessing: true,
+        processingMessage: 'Regenerating heightmap...',
+      });
       scheduleHeightmapExtraction(set);
     }
   },
@@ -1121,7 +1148,13 @@ export const useStore = create<StoreState>((set, get) => ({
     const state = get();
     if (state.mode === 'ai' && state.imageBitmap) {
       if (p.invert !== undefined && p.invert !== previousInvert) {
-        set({ isProcessing: true, processingMessage: 'Re-running AI depth estimation...' });
+        set({
+          depthResult: null,
+          meshResult: null,
+          viewportInfo: null,
+          isProcessing: true,
+          processingMessage: 'Re-running AI depth estimation...',
+        });
         requestDepthEstimation(state.imageBitmap, p.invert, set);
       } else if (state.depthResult) {
         set({ isProcessing: true, processingMessage: 'Rebuilding mesh...' });
@@ -1246,6 +1279,10 @@ export const useStore = create<StoreState>((set, get) => ({
 
   saveProject: async () => {
     const s = get();
+    if (s.isProcessing || !s.depthResult) {
+      set({ error: 'Wait for the current image and depth calculation to finish before saving.' });
+      return;
+    }
     const db = await getDB();
     const timestamp = new Date().toISOString();
 
@@ -1353,7 +1390,11 @@ export const useStore = create<StoreState>((set, get) => ({
             }
           : undefined,
       };
-      await db.put(STORE_NAME, upgraded);
+      try {
+        await db.put(STORE_NAME, upgraded);
+      } catch (error) {
+        loadError = error instanceof Error ? error.message : 'Project migration could not be saved';
+      }
       if (generation !== operationGeneration) {
         imageBitmap?.close();
         if (imageUrl) URL.revokeObjectURL(imageUrl);
@@ -1395,7 +1436,9 @@ export const useStore = create<StoreState>((set, get) => ({
 
   listProjects: async () => {
     const db = await getDB();
-    return db.getAll(STORE_NAME);
+    const projects = await db.getAll(STORE_NAME);
+    set({ projects });
+    return projects;
   },
 
   deleteProject: async (id: string) => {

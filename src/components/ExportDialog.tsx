@@ -214,7 +214,7 @@ export default function ExportDialog() {
           type: 'export',
           id,
           mesh,
-          albedoImage: image ?? undefined,
+          albedoImage: format === 'glb' || (showTextures && includeTextures) ? image ?? undefined : undefined,
           options,
           maps: mapsData,
         })
