@@ -139,12 +139,13 @@ interface DepthInitResult {
 
 let meshWorker: Worker | null = null;
 let mapWorker: Worker | null = null;
+let previewMapWorker: Worker | null = null;
 let depthWorker: Worker | null = null;
 let depthInitPromise: Promise<DepthInitResult> | null = null;
 let activeDepthRequestId: string | null = null;
 let activeDepthEstimatePosted = false;
 let activePreviewMapId: string | null = null;
-let activePreviewMapPosted = false;
+let activePreviewMapCleanup: (() => void) | null = null;
 let activeHeightmapRequestId: string | null = null;
 let activeHeightmapPosted = false;
 let activeMeshRequestId: string | null = null;
@@ -152,6 +153,7 @@ let activeMeshRequestPosted = false;
 let activeMeshCleanup: (() => void) | null = null;
 let meshDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let reliefDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let previewMapDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let errorTimeout: ReturnType<typeof setTimeout> | null = null;
 let operationGeneration = 0;
 
@@ -159,8 +161,9 @@ function invalidateOperations(): number {
   operationGeneration += 1;
   clearMeshDebounce();
   clearReliefDebounce();
+  clearPreviewMapDebounce();
   if (depthWorker) cancelDepthEstimation(depthWorker);
-  if (mapWorker) cancelPreviewMapGeneration(mapWorker);
+  if (previewMapWorker) disposePreviewMapWorker();
   if (meshWorker) {
     cancelHeightmapExtraction(meshWorker);
     cancelMeshGeneration(meshWorker);
@@ -186,6 +189,16 @@ function getMapWorker(): Worker {
     );
   }
   return mapWorker;
+}
+
+function getPreviewMapWorker(): Worker {
+  if (!previewMapWorker) {
+    previewMapWorker = new Worker(
+      new URL('../workers/mesh/mesh.worker.ts', import.meta.url),
+      { type: 'module' }
+    );
+  }
+  return previewMapWorker;
 }
 
 function getDepthWorker(): Worker {
@@ -705,12 +718,21 @@ function getMapRequests(maps: MapParams): PreviewMapRequest[] {
   return requests;
 }
 
-function cancelPreviewMapGeneration(worker: Worker): void {
-  if (activePreviewMapId && activePreviewMapPosted) {
-    worker.postMessage({ type: 'cancel', id: activePreviewMapId });
+function clearPreviewMapDebounce(): void {
+  if (previewMapDebounceTimer) {
+    clearTimeout(previewMapDebounceTimer);
+    previewMapDebounceTimer = null;
+  }
+}
+
+function disposePreviewMapWorker(): void {
+  activePreviewMapCleanup?.();
+  activePreviewMapCleanup = null;
+  if (previewMapWorker) {
+    previewMapWorker.terminate();
+    previewMapWorker = null;
   }
   activePreviewMapId = null;
-  activePreviewMapPosted = false;
 }
 
 function requestPreviewMaps(
@@ -719,12 +741,13 @@ function requestPreviewMaps(
   set: (partial: SetState) => void,
   generation = operationGeneration,
 ): void {
-  const worker = getMapWorker();
-  cancelPreviewMapGeneration(worker);
+  disposePreviewMapWorker();
+  const worker = getPreviewMapWorker();
 
   const requests = getMapRequests(maps);
 
   if (requests.length === 0) {
+    disposePreviewMapWorker();
     set({ previewMaps: {} });
     return;
   }
@@ -740,8 +763,7 @@ function requestPreviewMaps(
       if (generation !== operationGeneration || activePreviewMapId !== id) return;
 
       activePreviewMapId = null;
-      activePreviewMapPosted = false;
-      const previewMaps: PreviewMaps = {};
+          const previewMaps: PreviewMaps = {};
       const entries = data.maps as Array<{
         mapType: MapType;
         width: number;
@@ -761,20 +783,21 @@ function requestPreviewMaps(
       if (generation !== operationGeneration || activePreviewMapId !== id) return;
 
       activePreviewMapId = null;
-      activePreviewMapPosted = false;
-      set({ previewMaps: {}, error: data.error });
+          set({ previewMaps: {}, error: data.error });
     }
   };
 
   const cleanup = () => {
     worker.removeEventListener('message', onMessage);
     worker.removeEventListener('error', onError);
+    clearTimeout(timeout);
+    if (activePreviewMapCleanup === cleanup) activePreviewMapCleanup = null;
   };
 
   const onError = (event: ErrorEvent) => {
-    if (mapWorker === worker) {
+    if (previewMapWorker === worker) {
       worker.terminate();
-      mapWorker = null;
+      previewMapWorker = null;
     }
     onMessage({
       data: {
@@ -785,9 +808,17 @@ function requestPreviewMaps(
     } as MessageEvent);
   };
 
+  const timeout = setTimeout(() => {
+    cleanup();
+    disposePreviewMapWorker();
+    if (generation === operationGeneration && activePreviewMapId === id) {
+      set({ previewMaps: {}, error: 'PBR preview maps timed out. Try a lower mesh resolution.' });
+    }
+  }, 120_000);
+
+  activePreviewMapCleanup = cleanup;
   worker.addEventListener('message', onMessage);
   worker.addEventListener('error', onError);
-  activePreviewMapPosted = true;
   worker.postMessage(
     {
       type: 'build-maps',
@@ -800,6 +831,17 @@ function requestPreviewMaps(
     },
     [heights.buffer],
   );
+}
+
+function schedulePreviewMapRefresh(set: (partial: SetState) => void): void {
+  clearPreviewMapDebounce();
+  const generation = operationGeneration;
+  previewMapDebounceTimer = setTimeout(() => {
+    previewMapDebounceTimer = null;
+    const state = useStore.getState();
+    if (generation !== operationGeneration || state.materialMode !== 'pbr' || !state.depthResult) return;
+    requestPreviewMaps(state.depthResult, state.maps, set, generation);
+  }, 150);
 }
 
 export function bakeMapsInWorker(
@@ -1131,11 +1173,12 @@ export const useStore = create<StoreState>((set, get) => ({
   refreshPreviewMaps: () => {
     const state = get();
     if (!state.depthResult || state.materialMode !== 'pbr') {
-      if (mapWorker) cancelPreviewMapGeneration(mapWorker);
+      clearPreviewMapDebounce();
+      disposePreviewMapWorker();
       set({ previewMaps: {} });
       return;
     }
-    requestPreviewMaps(state.depthResult, state.maps, set);
+    schedulePreviewMapRefresh(set);
   },
 
   setProcessing: (v: boolean, msg?: string) => set({ isProcessing: v, processingMessage: msg ?? '' }),
@@ -1270,6 +1313,8 @@ export const useStore = create<StoreState>((set, get) => ({
         }
       } catch (error) {
         loadError = error instanceof Error ? error.message : String(error);
+        imageBitmap?.close();
+        if (imageUrl) URL.revokeObjectURL(imageUrl);
         image = null;
         imageUrl = null;
         imageBitmap = null;
@@ -1278,20 +1323,24 @@ export const useStore = create<StoreState>((set, get) => ({
 
     let depthResult: DepthResult | null = null;
     if (project.depthCache) {
-      const depthData = copyStoredDepthData(project.depthCache.data);
-      if (depthData && depthData.length === project.depthCache.width * project.depthCache.height) {
-        depthResult = {
-          width: project.depthCache.width,
-          height: project.depthCache.height,
-          data: depthData,
-        };
-        if (Array.isArray(project.depthCache.data)) migrated = true;
-      } else {
-        loadError = 'Project depth cache has an invalid size or format';
+      try {
+        const depthData = copyStoredDepthData(project.depthCache.data);
+        if (depthData && depthData.length === project.depthCache.width * project.depthCache.height) {
+          depthResult = {
+            width: project.depthCache.width,
+            height: project.depthCache.height,
+            data: depthData,
+          };
+          if (Array.isArray(project.depthCache.data)) migrated = true;
+        } else {
+          loadError = 'Project depth cache has an invalid size or format';
+        }
+      } catch (error) {
+        loadError = error instanceof Error ? error.message : 'Project depth cache has an invalid format';
       }
     }
 
-    if (migrated && imageBlob) {
+    if (migrated) {
       const upgraded: ProjectData = {
         ...project,
         imageBlob,
@@ -1305,6 +1354,11 @@ export const useStore = create<StoreState>((set, get) => ({
           : undefined,
       };
       await db.put(STORE_NAME, upgraded);
+      if (generation !== operationGeneration) {
+        imageBitmap?.close();
+        if (imageUrl) URL.revokeObjectURL(imageUrl);
+        return;
+      }
     }
 
     set({
