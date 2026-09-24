@@ -45,6 +45,19 @@ export default function LeftPanel() {
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
+  const handleResolutionChange = (nextResolution: number) => {
+    if (
+      nextResolution === 2048 &&
+      resolution !== 2048 &&
+      !window.confirm(
+        '2048 × 2048 can allocate hundreds of megabytes and may crash this tab. Continue?',
+      )
+    ) {
+      return;
+    }
+    setResolution(nextResolution);
+  };
+
   const cap = CAPABILITY_LABELS[capability] ?? CAPABILITY_LABELS.unavailable
 
   return (
@@ -228,7 +241,7 @@ export default function LeftPanel() {
         </label>
         <select
           value={resolution}
-          onChange={(e) => setResolution(Number(e.target.value))}
+          onChange={(e) => handleResolutionChange(Number(e.target.value))}
           className="w-full bg-[var(--color-surface-overlay)] text-[var(--color-text)] text-xs px-2.5 py-1.5 rounded border border-[var(--color-border)] outline-none focus:border-[var(--color-brand)] transition-colors cursor-pointer"
           aria-label="Mesh resolution"
         >

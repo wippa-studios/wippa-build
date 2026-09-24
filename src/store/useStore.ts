@@ -492,6 +492,12 @@ function scheduleMeshGeneration(set: (partial: SetState) => void): void {
   }, 150);
 }
 
+function getResolutionFallback(resolution: number): number | null {
+  if (resolution === 2048) return 1024;
+  if (resolution === 1024) return 512;
+  return null;
+}
+
 function requestMeshGeneration(
   heights: Float32Array,
   width: number,
@@ -540,6 +546,23 @@ function requestMeshGeneration(
 
       activeMeshRequestId = null;
       activeMeshRequestPosted = false;
+      const fallbackResolution = getResolutionFallback(state.resolution);
+      if (fallbackResolution !== null) {
+        set({
+          resolution: fallbackResolution,
+          isProcessing: true,
+          processingMessage: `Mesh build failed at ${state.resolution}px. Retrying at ${fallbackResolution}px...`,
+        });
+        requestMeshGeneration(
+          heights,
+          width,
+          height,
+          { ...state, resolution: fallbackResolution },
+          set,
+        );
+        return;
+      }
+
       set({
         isProcessing: false,
         processingMessage: '',
