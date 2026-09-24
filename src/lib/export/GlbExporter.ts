@@ -1,4 +1,4 @@
-import type { MeshBuildResult, ExportOptions } from '../../types';
+import type { MeshBuildResult, ExportOptions, AxisConvention } from '../../types';
 
 const GLB_MAGIC = 0x46546c67;
 const GLB_VERSION = 2;
@@ -32,6 +32,56 @@ function padTo4(src: Uint8Array): Uint8Array {
 async function readBlob(blob: Blob): Promise<Uint8Array> {
   const buf = await blob.arrayBuffer();
   return new Uint8Array(buf);
+}
+
+function transformPosition(
+  x: number,
+  y: number,
+  z: number,
+  axisConvention: AxisConvention,
+  scale: number,
+): [number, number, number] {
+  let tx = x * scale;
+  let ty = y * scale;
+  let tz = z * scale;
+
+  if (axisConvention === 'unity') {
+    const tmp = ty;
+    ty = tz;
+    tz = -tmp;
+  } else if (axisConvention === 'unreal') {
+    tx *= 100;
+    ty *= 100;
+    tz *= 100;
+    const tmp = ty;
+    ty = tz;
+    tz = -tmp;
+  }
+
+  return [tx, ty, tz];
+}
+
+function transformNormal(
+  x: number,
+  y: number,
+  z: number,
+  axisConvention: AxisConvention,
+): [number, number, number] {
+  const nx = x;
+  let ny = y;
+  let nz = z;
+
+  if (axisConvention === 'unity') {
+    const tmp = ny;
+    ny = nz;
+    nz = -tmp;
+  } else if (axisConvention === 'unreal') {
+    const tmp = ny;
+    ny = nz;
+    nz = -tmp;
+  }
+
+  return [nx, ny, nz];
 }
 
 interface ImageDef {
@@ -234,6 +284,7 @@ function buildGltfJson(
 
 export async function exportGlb(
   mesh: MeshBuildResult,
+  options: ExportOptions,
   albedoImage?: Blob,
   maps?: { normal?: Blob; ao?: Blob; roughness?: Blob; height?: Blob },
 ): Promise<Blob> {
@@ -275,18 +326,33 @@ export async function exportGlb(
 
   let writeOffset = 0;
 
-  binBytes.set(
-    new Uint8Array(mesh.positions.buffer, mesh.positions.byteOffset, posBytes),
-    writeOffset,
-  );
+  // Write positions with axis convention transformation
+  const positionsView = new DataView(binBuffer, writeOffset, posBytes);
+  for (let i = 0; i < vertexCount; i++) {
+    const px = mesh.positions[i * 3];
+    const py = mesh.positions[i * 3 + 1];
+    const pz = mesh.positions[i * 3 + 2];
+    const [tx, ty, tz] = transformPosition(px, py, pz, options.axisConvention, options.scale);
+    positionsView.setFloat32(i * 12, tx, true);
+    positionsView.setFloat32(i * 12 + 4, ty, true);
+    positionsView.setFloat32(i * 12 + 8, tz, true);
+  }
   writeOffset += posBytes;
 
-  binBytes.set(
-    new Uint8Array(mesh.normals.buffer, mesh.normals.byteOffset, normBytes),
-    writeOffset,
-  );
+  // Write normals with axis convention transformation
+  const normalsView = new DataView(binBuffer, writeOffset, normBytes);
+  for (let i = 0; i < vertexCount; i++) {
+    const nx = mesh.normals[i * 3];
+    const ny = mesh.normals[i * 3 + 1];
+    const nz = mesh.normals[i * 3 + 2];
+    const [tnx, tny, tnz] = transformNormal(nx, ny, nz, options.axisConvention);
+    normalsView.setFloat32(i * 12, tnx, true);
+    normalsView.setFloat32(i * 12 + 4, tny, true);
+    normalsView.setFloat32(i * 12 + 8, tnz, true);
+  }
   writeOffset += normBytes;
 
+  // UVs don't need transformation
   binBytes.set(
     new Uint8Array(mesh.uvs.buffer, mesh.uvs.byteOffset, uvBytes),
     writeOffset,
@@ -314,7 +380,7 @@ export async function exportGlb(
     writeOffset = imgOffset + imageData[i].byteLength;
   }
 
-  const gltfJson = buildGltfJson(mesh, imageDefs, imageOffsets, useShortIndices, 'glb');
+  const gltfJson = buildGltfJson(mesh, imageDefs, imageOffsets, useShortIndices, 'glb', options.axisConvention);
   const jsonString = JSON.stringify(gltfJson);
   const jsonBytes = padTo4(new TextEncoder().encode(jsonString));
 

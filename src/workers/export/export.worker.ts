@@ -84,7 +84,7 @@ async function handleExport(msg: {
 
   switch (format) {
     case 'glb': {
-      const blob = await exportGlb(mesh, undefined, mapsBlob);
+      const blob = await exportGlb(mesh, options, undefined, mapsBlob);
       return { type: 'export-result', id, format: 'glb', blob };
     }
 
