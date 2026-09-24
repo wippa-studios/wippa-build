@@ -1,4 +1,5 @@
-import type { MeshBuildResult, ExportOptions, AxisConvention } from '../../types';
+import type { MeshBuildResult, ExportOptions } from '../../types';
+import { transformMesh } from './AxisTransform';
 
 const GLB_MAGIC = 0x46546c67;
 const GLB_VERSION = 2;
@@ -32,56 +33,6 @@ function padTo4(src: Uint8Array): Uint8Array {
 async function readBlob(blob: Blob): Promise<Uint8Array> {
   const buf = await blob.arrayBuffer();
   return new Uint8Array(buf);
-}
-
-function transformPosition(
-  x: number,
-  y: number,
-  z: number,
-  axisConvention: AxisConvention,
-  scale: number,
-): [number, number, number] {
-  let tx = x * scale;
-  let ty = y * scale;
-  let tz = z * scale;
-
-  if (axisConvention === 'unity') {
-    const tmp = ty;
-    ty = tz;
-    tz = -tmp;
-  } else if (axisConvention === 'unreal') {
-    tx *= 100;
-    ty *= 100;
-    tz *= 100;
-    const tmp = ty;
-    ty = tz;
-    tz = -tmp;
-  }
-
-  return [tx, ty, tz];
-}
-
-function transformNormal(
-  x: number,
-  y: number,
-  z: number,
-  axisConvention: AxisConvention,
-): [number, number, number] {
-  const nx = x;
-  let ny = y;
-  let nz = z;
-
-  if (axisConvention === 'unity') {
-    const tmp = ny;
-    ny = nz;
-    nz = -tmp;
-  } else if (axisConvention === 'unreal') {
-    const tmp = ny;
-    ny = nz;
-    nz = -tmp;
-  }
-
-  return [nx, ny, nz];
 }
 
 interface ImageDef {
@@ -293,8 +244,9 @@ export async function exportGlb(
   albedoImage?: Blob,
   maps?: { normal?: Blob; ao?: Blob; roughness?: Blob; height?: Blob },
 ): Promise<Blob> {
-  const vertexCount = mesh.positions.length / 3;
-  const indexCount = mesh.indices.length;
+  const exportMesh = transformMesh(mesh, options.axisConvention, options.scale);
+  const vertexCount = exportMesh.positions.length / 3;
+  const indexCount = exportMesh.indices.length;
   const useShortIndices = vertexCount < 65536;
 
   const posBytes = vertexCount * 12;
@@ -331,48 +283,36 @@ export async function exportGlb(
 
   let writeOffset = 0;
 
-  // Write positions with axis convention transformation
-  const positionsView = new DataView(binBuffer, writeOffset, posBytes);
-  for (let i = 0; i < vertexCount; i++) {
-    const px = mesh.positions[i * 3];
-    const py = mesh.positions[i * 3 + 1];
-    const pz = mesh.positions[i * 3 + 2];
-    const [tx, ty, tz] = transformPosition(px, py, pz, options.axisConvention, options.scale);
-    positionsView.setFloat32(i * 12, tx, true);
-    positionsView.setFloat32(i * 12 + 4, ty, true);
-    positionsView.setFloat32(i * 12 + 8, tz, true);
-  }
+  // Write transformed positions.
+  binBytes.set(
+    new Uint8Array(exportMesh.positions.buffer, exportMesh.positions.byteOffset, posBytes),
+    writeOffset,
+  );
   writeOffset += posBytes;
 
-  // Write normals with axis convention transformation
-  const normalsView = new DataView(binBuffer, writeOffset, normBytes);
-  for (let i = 0; i < vertexCount; i++) {
-    const nx = mesh.normals[i * 3];
-    const ny = mesh.normals[i * 3 + 1];
-    const nz = mesh.normals[i * 3 + 2];
-    const [tnx, tny, tnz] = transformNormal(nx, ny, nz, options.axisConvention);
-    normalsView.setFloat32(i * 12, tnx, true);
-    normalsView.setFloat32(i * 12 + 4, tny, true);
-    normalsView.setFloat32(i * 12 + 8, tnz, true);
-  }
+  // Write transformed normals.
+  binBytes.set(
+    new Uint8Array(exportMesh.normals.buffer, exportMesh.normals.byteOffset, normBytes),
+    writeOffset,
+  );
   writeOffset += normBytes;
 
   // UVs don't need transformation
   binBytes.set(
-    new Uint8Array(mesh.uvs.buffer, mesh.uvs.byteOffset, uvBytes),
+    new Uint8Array(exportMesh.uvs.buffer, exportMesh.uvs.byteOffset, uvBytes),
     writeOffset,
   );
   writeOffset += uvBytes;
 
   if (useShortIndices) {
-    const shortIndices = new Uint16Array(mesh.indices);
+    const shortIndices = new Uint16Array(exportMesh.indices);
     binBytes.set(
       new Uint8Array(shortIndices.buffer, shortIndices.byteOffset, idxBytes),
       writeOffset,
     );
   } else {
     binBytes.set(
-      new Uint8Array(mesh.indices.buffer, mesh.indices.byteOffset, idxBytes),
+      new Uint8Array(exportMesh.indices.buffer, exportMesh.indices.byteOffset, idxBytes),
       writeOffset,
     );
   }
@@ -385,7 +325,7 @@ export async function exportGlb(
     writeOffset = imgOffset + imageData[i].byteLength;
   }
 
-  const gltfJson = buildGltfJson(mesh, imageDefs, imageOffsets, useShortIndices, 'glb', options.axisConvention);
+  const gltfJson = buildGltfJson(exportMesh, imageDefs, imageOffsets, useShortIndices, 'glb', options.axisConvention);
   const jsonString = JSON.stringify(gltfJson);
   const jsonBytes = padTo4(new TextEncoder().encode(jsonString));
 
@@ -429,7 +369,8 @@ export async function exportGltf(
   albedoImage?: Blob,
   maps?: { normal?: Blob; ao?: Blob; roughness?: Blob; height?: Blob },
 ): Promise<{ json: object; bin: ArrayBuffer; binName: string; textures: Map<string, Blob> }> {
-  const vertexCount = mesh.positions.length / 3;
+  const exportMesh = transformMesh(mesh, options.axisConvention, options.scale);
+  const vertexCount = exportMesh.positions.length / 3;
   const useShortIndices = vertexCount < 65536;
 
   const textures = new Map<string, Blob>();
@@ -460,7 +401,7 @@ export async function exportGltf(
   const posBytes = vertexCount * 12;
   const normBytes = vertexCount * 12;
   const uvBytes = vertexCount * 8;
-  const idxBytes = mesh.indices.length * (useShortIndices ? 2 : 4);
+  const idxBytes = exportMesh.indices.length * (useShortIndices ? 2 : 4);
   const geometryBytes = posBytes + normBytes + uvBytes + idxBytes;
 
   const binBuffer = new ArrayBuffer(geometryBytes);
@@ -469,32 +410,32 @@ export async function exportGltf(
   let writeOffset = 0;
 
   binBytes.set(
-    new Uint8Array(mesh.positions.buffer, mesh.positions.byteOffset, posBytes),
+    new Uint8Array(exportMesh.positions.buffer, exportMesh.positions.byteOffset, posBytes),
     writeOffset,
   );
   writeOffset += posBytes;
 
   binBytes.set(
-    new Uint8Array(mesh.normals.buffer, mesh.normals.byteOffset, normBytes),
+    new Uint8Array(exportMesh.normals.buffer, exportMesh.normals.byteOffset, normBytes),
     writeOffset,
   );
   writeOffset += normBytes;
 
   binBytes.set(
-    new Uint8Array(mesh.uvs.buffer, mesh.uvs.byteOffset, uvBytes),
+    new Uint8Array(exportMesh.uvs.buffer, exportMesh.uvs.byteOffset, uvBytes),
     writeOffset,
   );
   writeOffset += uvBytes;
 
   if (useShortIndices) {
-    const shortIndices = new Uint16Array(mesh.indices);
+    const shortIndices = new Uint16Array(exportMesh.indices);
     binBytes.set(
       new Uint8Array(shortIndices.buffer, shortIndices.byteOffset, idxBytes),
       writeOffset,
     );
   } else {
     binBytes.set(
-      new Uint8Array(mesh.indices.buffer, mesh.indices.byteOffset, idxBytes),
+      new Uint8Array(exportMesh.indices.buffer, exportMesh.indices.byteOffset, idxBytes),
       writeOffset,
     );
   }
@@ -502,7 +443,7 @@ export async function exportGltf(
   // Update imageDefs with actual byteLengths (0 for glTF since they're external)
   // But we need to set the buffer byteLength in the JSON
   const json = buildGltfJson(
-    mesh,
+    exportMesh,
     imageDefs,
     [],
     useShortIndices,
