@@ -48,6 +48,12 @@ function formatBytes(bytes: number): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
 }
 
+function getExportTimeoutMs(triangleCount: number, mapCount: number): number {
+  const geometryFactor = Math.max(0, triangleCount / 500_000)
+  const timeout = 30_000 + geometryFactor * 30_000 + mapCount * 10_000
+  return Math.min(300_000, Math.ceil(timeout))
+}
+
 export default function ExportDialog() {
   const exportDialogOpen = useStore((s) => s.exportDialogOpen)
   const mesh = useStore((s) => s.meshResult)
@@ -169,24 +175,38 @@ export default function ExportDialog() {
       workerRef.current = worker
 
       type ExportWorkerResult = { type: string; id: string; format: string; blob?: Blob; json?: object; bin?: ArrayBuffer; binName?: string; obj?: string; mtl?: string; textures?: Array<{ name: string; blob: Blob }>; maps?: Array<{ name: string; blob: Blob }> }
+      const timeoutMs = getExportTimeoutMs(mesh.triangleCount, Object.keys(mapsData ?? {}).length)
       const result = await new Promise<ExportWorkerResult>((resolve, reject) => {
+        let settled = false
+
+        const settle = (action: () => void) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timeout)
+          worker.onmessage = null
+          worker.onerror = null
+          action()
+        }
+
         const timeout = setTimeout(() => {
-          reject(new Error('Export timed out'))
-        }, 30000)
+          worker.postMessage({ type: 'cancel', id })
+          settle(() => reject(new Error(
+            `Export timed out after ${Math.round(timeoutMs / 1000)} seconds. Try a lower mesh resolution or disable textures.`,
+          )))
+        }, timeoutMs)
 
         worker.onmessage = (e) => {
-          clearTimeout(timeout)
           const data = e.data
           if (data.type === 'export-error') {
-            reject(new Error(data.error))
+            if (data.id !== id) return
+            settle(() => reject(new Error(data.error)))
           } else if (data.id === id) {
-            resolve(data)
+            settle(() => resolve(data))
           }
         }
 
         worker.onerror = (e) => {
-          clearTimeout(timeout)
-          reject(new Error(e.message || 'Export worker error'))
+          settle(() => reject(new Error(e.message || 'Export worker error')))
         }
 
         worker.postMessage({
