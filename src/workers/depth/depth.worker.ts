@@ -1,5 +1,7 @@
 /// <reference lib="webworker" />
 
+import { createCancellationRegistry } from '../../lib/workers/cancellation';
+
 type Device = 'webgpu' | 'wasm' | 'none';
 
 type DepthPipeline = ((input: ImageBitmap) => Promise<{
@@ -30,7 +32,7 @@ type WorkerMessage =
 let pipeline: DepthPipeline | null = null;
 let device: Device = 'none';
 let initialization: Promise<InitResult> | null = null;
-const cancelledIds = new Set<string>();
+const cancelledIds = createCancellationRegistry();
 
 async function loadPipeline(): Promise<InitResult> {
   try {
@@ -140,8 +142,7 @@ async function handleEstimate(
     return;
   }
 
-  if (cancelledIds.has(id)) {
-    cancelledIds.delete(id);
+  if (cancelledIds.consume(id)) {
     image.close();
     return;
   }
@@ -150,7 +151,7 @@ async function handleEstimate(
     const result = await pipeline(image);
     image.close();
 
-    if (cancelledIds.delete(id)) return;
+    if (cancelledIds.consume(id)) return;
 
     const depthData = result.depth;
     let depthPixels: Uint8ClampedArray;
@@ -183,7 +184,7 @@ async function handleEstimate(
         ? normalized
         : bilinearResample(normalized, modelW, modelH, targetW, targetH);
 
-    if (cancelledIds.delete(id)) return;
+    if (cancelledIds.consume(id)) return;
 
     self.postMessage(
       { type: 'depth-result', id, width: targetW, height: targetH, data: resampled.buffer, device },
@@ -191,7 +192,7 @@ async function handleEstimate(
     );
   } catch (error) {
     image.close();
-    if (cancelledIds.delete(id)) return;
+    if (cancelledIds.consume(id)) return;
     self.postMessage({
       type: 'error',
       id,
@@ -201,7 +202,7 @@ async function handleEstimate(
 }
 
 function handleCancel(id: string): void {
-  cancelledIds.add(id);
+  cancelledIds.mark(id);
 }
 
 async function handleDispose(): Promise<void> {

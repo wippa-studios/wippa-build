@@ -1,4 +1,5 @@
 import type { MapType, MeshBuildInput, ReliefSource } from '../../types';
+import { createCancellationRegistry } from '../../lib/workers/cancellation';
 import { buildPlaneMesh, buildPlateMesh } from '../../lib/mesh/MeshBuilder';
 import { createHeightmapFromImageData, gaussianBlur } from '../../lib/mesh/HeightMap';
 import { bakeMap } from '../../lib/maps/MapBaker';
@@ -30,21 +31,21 @@ type WorkerMessage =
     }
   | { type: 'cancel'; id: string };
 
-const cancelled = new Set<string>();
+const cancelled = createCancellationRegistry();
 
 self.onmessage = (event: MessageEvent<WorkerMessage>) => {
   const message = event.data;
 
   switch (message.type) {
     case 'cancel': {
-      cancelled.add(message.id);
+      cancelled.mark(message.id);
       break;
     }
 
     case 'build-mesh': {
       const { id, input } = message;
 
-      if (cancelled.delete(id)) break;
+      if (cancelled.consume(id)) break;
 
       try {
         const heights = input.smoothing > 0
@@ -55,10 +56,10 @@ self.onmessage = (event: MessageEvent<WorkerMessage>) => {
           ? buildPlateMesh(buildInput)
           : buildPlaneMesh(buildInput);
 
-        if (cancelled.delete(id)) break;
+        if (cancelled.consume(id)) break;
         self.postMessage({ type: 'mesh-result', id, result });
       } catch (error) {
-        if (cancelled.delete(id)) break;
+        if (cancelled.consume(id)) break;
         self.postMessage({
           type: 'error',
           id,
@@ -70,7 +71,7 @@ self.onmessage = (event: MessageEvent<WorkerMessage>) => {
 
     case 'extract-heightmap': {
       const { id, image, source, gamma, contrast } = message;
-      if (cancelled.delete(id)) {
+      if (cancelled.consume(id)) {
         image.close();
         break;
       }
@@ -86,14 +87,14 @@ self.onmessage = (event: MessageEvent<WorkerMessage>) => {
         const heights = createHeightmapFromImageData(imageData, source, gamma, contrast);
         image.close();
 
-        if (cancelled.delete(id)) break;
+        if (cancelled.consume(id)) break;
         self.postMessage(
           { type: 'heightmap-result', id, width, height, data: heights.buffer },
           [heights.buffer],
         );
       } catch (error) {
         image.close();
-        if (cancelled.delete(id)) break;
+        if (cancelled.consume(id)) break;
         self.postMessage({
           type: 'error',
           id,
@@ -105,7 +106,7 @@ self.onmessage = (event: MessageEvent<WorkerMessage>) => {
 
     case 'build-maps': {
       const { id, heights, width, height, resolution, mapRequests } = message;
-      if (cancelled.delete(id)) break;
+      if (cancelled.consume(id)) break;
 
       try {
         const maps: Array<{
@@ -138,10 +139,10 @@ self.onmessage = (event: MessageEvent<WorkerMessage>) => {
           transfer.push(buffer);
         }
 
-        if (cancelled.delete(id)) break;
+        if (cancelled.consume(id)) break;
         self.postMessage({ type: 'maps-result', id, maps }, transfer);
       } catch (error) {
-        if (cancelled.delete(id)) break;
+        if (cancelled.consume(id)) break;
         self.postMessage({
           type: 'error',
           id,

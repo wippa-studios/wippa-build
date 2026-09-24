@@ -3,6 +3,7 @@ import { exportGlb, exportGltf } from '../../lib/export/GlbExporter';
 import { exportObjWithMtl } from '../../lib/export/ObjExporter';
 import { exportStl } from '../../lib/export/StlExporter';
 import { imageDataToPngBlob } from '../../lib/maps/MapBaker';
+import { createCancellationRegistry } from '../../lib/workers/cancellation';
 
 type ExportMessage =
   | {
@@ -38,7 +39,7 @@ type WorkerResult =
     }
   | { type: 'export-error'; id: string; error: string };
 
-const cancelled = new Set<string>();
+const cancelled = createCancellationRegistry();
 
 async function convertMapsToBlobs(
   maps: Record<string, { width: number; height: number; data: ArrayBuffer }> | undefined,
@@ -142,29 +143,26 @@ self.onmessage = (e: MessageEvent<ExportMessage>) => {
 
   switch (msg.type) {
     case 'cancel': {
-      cancelled.add(msg.id);
+      cancelled.mark(msg.id);
       break;
     }
 
     case 'export': {
       const { id } = msg;
 
-      if (cancelled.has(id)) {
-        cancelled.delete(id);
+      if (cancelled.consume(id)) {
         break;
       }
 
       handleExport(msg)
         .then((result) => {
-          if (cancelled.has(id)) {
-            cancelled.delete(id);
+          if (cancelled.consume(id)) {
             return;
           }
           self.postMessage(result);
         })
         .catch((err) => {
-          if (cancelled.has(id)) {
-            cancelled.delete(id);
+          if (cancelled.consume(id)) {
             return;
           }
           const message = err instanceof Error ? err.message : String(err);
