@@ -67,11 +67,21 @@ export function transformMesh(
     normals[i * 3 + 2] = normal[2];
   }
 
+  let indices = mesh.indices;
+  if (axisConvention === 'unity' && mesh.indices.length >= 3) {
+    indices = new Uint32Array(mesh.indices);
+    for (let i = 0; i < indices.length; i += 3) {
+      const second = indices[i + 1];
+      indices[i + 1] = indices[i + 2];
+      indices[i + 2] = second;
+    }
+  }
+
   return {
     positions,
     normals,
     uvs: mesh.uvs,
-    indices: mesh.indices,
+    indices,
     triangleCount: mesh.triangleCount,
     bounds: vertexCount === 0 ? mesh.bounds : { min, max },
   };

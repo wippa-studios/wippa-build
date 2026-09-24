@@ -44,6 +44,8 @@ function getProjectParams(s: StoreState): ProjectParams {
 const DB_NAME = 'wippa-build';
 const DB_VERSION = 1;
 const STORE_NAME = 'projects';
+const MAX_INPUT_DIMENSION = 4096;
+const MAX_INPUT_FILE_BYTES = 100 * 1024 * 1024;
 
 async function getDB(): Promise<IDBPDatabase> {
   return openDB(DB_NAME, DB_VERSION, {
@@ -143,7 +145,6 @@ let previewMapWorker: Worker | null = null;
 let depthWorker: Worker | null = null;
 let depthInitPromise: Promise<DepthInitResult> | null = null;
 let activeDepthRequestId: string | null = null;
-let activeDepthEstimatePosted = false;
 let activePreviewMapId: string | null = null;
 let activePreviewMapCleanup: (() => void) | null = null;
 let activeHeightmapRequestId: string | null = null;
@@ -156,9 +157,12 @@ let reliefDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let previewMapDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let errorTimeout: ReturnType<typeof setTimeout> | null = null;
 let operationGeneration = 0;
+let saveRevision = 0;
+let saveQueue: Promise<void> = Promise.resolve();
 
 function invalidateOperations(): number {
   operationGeneration += 1;
+  saveRevision += 1;
   clearMeshDebounce();
   clearReliefDebounce();
   clearPreviewMapDebounce();
@@ -281,11 +285,14 @@ function ensureDepthInitialized(worker: Worker): Promise<DepthInitResult> {
 }
 
 function cancelDepthEstimation(worker: Worker): void {
-  if (activeDepthRequestId && activeDepthEstimatePosted) {
-    worker.postMessage({ type: 'cancel', id: activeDepthRequestId });
+  if (activeDepthRequestId) {
+    worker.terminate();
+    if (depthWorker === worker) {
+      depthWorker = null;
+      depthInitPromise = null;
+    }
   }
   activeDepthRequestId = null;
-  activeDepthEstimatePosted = false;
 }
 
 function requestDepthEstimation(
@@ -294,8 +301,8 @@ function requestDepthEstimation(
   set: (partial: SetState) => void,
   generation = operationGeneration,
 ): void {
+  if (depthWorker) cancelDepthEstimation(depthWorker);
   const worker = getDepthWorker();
-  cancelDepthEstimation(worker);
 
   const id = crypto.randomUUID();
   activeDepthRequestId = id;
@@ -307,8 +314,7 @@ function requestDepthEstimation(
     } catch (error) {
       if (activeDepthRequestId === id) {
         activeDepthRequestId = null;
-        activeDepthEstimatePosted = false;
-        set({
+              set({
           isProcessing: false,
           processingMessage: '',
           error: error instanceof Error ? error.message : String(error),
@@ -326,8 +332,7 @@ function requestDepthEstimation(
     } catch (error) {
       if (activeDepthRequestId === id) {
         activeDepthRequestId = null;
-        activeDepthEstimatePosted = false;
-        set({
+              set({
           isProcessing: false,
           processingMessage: '',
           error: error instanceof Error ? error.message : String(error),
@@ -348,8 +353,7 @@ function requestDepthEstimation(
         if (generation !== operationGeneration || activeDepthRequestId !== id) return;
 
         activeDepthRequestId = null;
-        activeDepthEstimatePosted = false;
-        const depth: DepthResult = {
+              const depth: DepthResult = {
           width: data.width,
           height: data.height,
           data: new Float32Array(data.data),
@@ -397,7 +401,6 @@ function requestDepthEstimation(
 
     worker.addEventListener('message', onMessage);
     worker.addEventListener('error', onError);
-    activeDepthEstimatePosted = true;
     worker.postMessage(
       {
         type: 'estimate',
@@ -1019,6 +1022,10 @@ export const useStore = create<StoreState>((set, get) => ({
       set({ isProcessing: false, error: 'Please choose a PNG, JPEG, or WebP image.' });
       return;
     }
+    if (file.size > MAX_INPUT_FILE_BYTES) {
+      set({ isProcessing: false, error: 'Images must be 100 MB or smaller.' });
+      return;
+    }
 
     const generation = invalidateOperations();
     const previous = get();
@@ -1027,6 +1034,9 @@ export const useStore = create<StoreState>((set, get) => ({
 
     try {
       bitmap = await createImageBitmap(await fetch(url).then((r) => r.blob()));
+      if (bitmap.width > MAX_INPUT_DIMENSION || bitmap.height > MAX_INPUT_DIMENSION) {
+        throw new Error(`Images must be ${MAX_INPUT_DIMENSION} × ${MAX_INPUT_DIMENSION} pixels or smaller.`);
+      }
       if (generation !== operationGeneration) {
         bitmap.close();
         URL.revokeObjectURL(url);
@@ -1129,6 +1139,7 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   setReliefParams: (p: Partial<ReliefParams>) => {
+    invalidateOperations();
     set((s) => ({ relief: { ...s.relief, ...p } }));
     if (get().mode === 'relief' && get().imageBitmap) {
       set({
@@ -1144,10 +1155,13 @@ export const useStore = create<StoreState>((set, get) => ({
 
   setAiParams: (p: Partial<AiParams>) => {
     const previousInvert = get().ai.invert;
+    const invertChanged = p.invert !== undefined && p.invert !== previousInvert;
+    const nextInvert = p.invert ?? previousInvert;
+    const generation = invertChanged ? invalidateOperations() : operationGeneration;
     set((s) => ({ ai: { ...s.ai, ...p } }));
     const state = get();
     if (state.mode === 'ai' && state.imageBitmap) {
-      if (p.invert !== undefined && p.invert !== previousInvert) {
+      if (invertChanged) {
         set({
           depthResult: null,
           meshResult: null,
@@ -1155,7 +1169,7 @@ export const useStore = create<StoreState>((set, get) => ({
           isProcessing: true,
           processingMessage: 'Re-running AI depth estimation...',
         });
-        requestDepthEstimation(state.imageBitmap, p.invert, set);
+        requestDepthEstimation(state.imageBitmap, nextInvert, set, generation);
       } else if (state.depthResult) {
         set({ isProcessing: true, processingMessage: 'Rebuilding mesh...' });
         requestMeshGeneration(state.depthResult.data, state.depthResult.width, state.depthResult.height, get(), set);
@@ -1283,9 +1297,10 @@ export const useStore = create<StoreState>((set, get) => ({
       set({ error: 'Wait for the current image and depth calculation to finish before saving.' });
       return;
     }
-    const db = await getDB();
-    const timestamp = new Date().toISOString();
 
+    const revision = ++saveRevision;
+    const generation = operationGeneration;
+    const timestamp = new Date().toISOString();
     const project: ProjectData = {
       id: s.projectId,
       name: s.projectName,
@@ -1296,27 +1311,39 @@ export const useStore = create<StoreState>((set, get) => ({
       imageWidth: s.imageWidth || undefined,
       imageHeight: s.imageHeight || undefined,
       params: getProjectParams(s),
-      depthCache: s.depthResult
-        ? {
-            width: s.depthResult.width,
-            height: s.depthResult.height,
-            data: new Float32Array(s.depthResult.data),
-          }
-        : undefined,
+      depthCache: {
+        width: s.depthResult.width,
+        height: s.depthResult.height,
+        data: new Float32Array(s.depthResult.data),
+      },
     };
 
-    await db.put(STORE_NAME, project);
+    const write = saveQueue.then(async () => {
+      if (revision !== saveRevision || generation !== operationGeneration) return;
+      const db = await getDB();
+      if (revision !== saveRevision || generation !== operationGeneration) return;
+      await db.put(STORE_NAME, project);
+    });
+    saveQueue = write.catch(() => undefined);
+
+    try {
+      await write;
+    } catch (error) {
+      if (revision === saveRevision && generation === operationGeneration) {
+        set({ error: error instanceof Error ? error.message : String(error) });
+      }
+    }
   },
 
   loadProject: async (id: string) => {
     const generation = invalidateOperations();
+    await saveQueue;
+    if (generation !== operationGeneration) return;
     const db = await getDB();
     const project = (await db.get(STORE_NAME, id)) as ProjectData | undefined;
     if (!project || generation !== operationGeneration) return;
 
     const s = get();
-    s.imageBitmap?.close();
-    if (s.imageUrl) URL.revokeObjectURL(s.imageUrl);
 
     let imageBitmap: ImageBitmap | null = null;
     let image: File | null = null;
@@ -1402,6 +1429,15 @@ export const useStore = create<StoreState>((set, get) => ({
       }
     }
 
+    if (generation !== operationGeneration) {
+      imageBitmap?.close();
+      if (imageUrl) URL.revokeObjectURL(imageUrl);
+      return;
+    }
+
+    s.imageBitmap?.close();
+    if (s.imageUrl) URL.revokeObjectURL(s.imageUrl);
+
     set({
       projectId: project.id,
       projectName: project.name,
@@ -1431,6 +1467,9 @@ export const useStore = create<StoreState>((set, get) => ({
       // No cached depth for AI mode, need to re-run estimation
       set({ isProcessing: true, processingMessage: 'Running AI depth estimation...' });
       requestDepthEstimation(imageBitmap, project.params.ai.invert, set, generation);
+    } else if (project.params.mode === 'relief' && imageBitmap) {
+      set({ isProcessing: true, processingMessage: 'Regenerating heightmap...' });
+      requestHeightmapExtraction(imageBitmap, project.params.relief, set, generation);
     }
   },
 

@@ -74,7 +74,12 @@ self.onmessage = (event: MessageEvent<WorkerMessage>) => {
           : buildPlaneMesh(buildInput);
 
         if (cancelled.consume(id)) break;
-        self.postMessage({ type: 'mesh-result', id, result });
+        self.postMessage({ type: 'mesh-result', id, result }, [
+          result.positions.buffer,
+          result.normals.buffer,
+          result.uvs.buffer,
+          result.indices.buffer,
+        ]);
       } catch (error) {
         if (cancelled.consume(id)) break;
         self.postMessage({

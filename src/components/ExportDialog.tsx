@@ -210,14 +210,27 @@ export default function ExportDialog() {
           settle(() => reject(new Error(e.message || 'Export worker error')))
         }
 
+        const exportMesh = {
+          positions: new Float32Array(mesh.positions),
+          normals: new Float32Array(mesh.normals),
+          uvs: new Float32Array(mesh.uvs),
+          indices: new Uint32Array(mesh.indices),
+          triangleCount: mesh.triangleCount,
+          bounds: mesh.bounds,
+        }
         worker.postMessage({
           type: 'export',
           id,
-          mesh,
+          mesh: exportMesh,
           albedoImage: format === 'glb' || (showTextures && includeTextures) ? image ?? undefined : undefined,
           options,
           maps: mapsData,
-        })
+        }, [
+          exportMesh.positions.buffer,
+          exportMesh.normals.buffer,
+          exportMesh.uvs.buffer,
+          exportMesh.indices.buffer,
+        ])
       })
 
       const projectName = useStore.getState().projectName.replace(/[^a-zA-Z0-9-_]/g, '_') || 'export'

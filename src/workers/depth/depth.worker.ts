@@ -2,6 +2,8 @@
 
 import { createCancellationRegistry } from '../../lib/workers/cancellation';
 
+const DEPTH_MODEL_ID = 'onnx-community/depth-anything-v2-small-ONNX';
+
 type Device = 'webgpu' | 'wasm' | 'none';
 
 type RawImageLike = {
@@ -54,7 +56,7 @@ async function loadPipeline(): Promise<InitResult> {
     try {
       const candidate = await createPipeline(
         'depth-estimation',
-        'depth-anything/Depth-Anything-V2-Small-hf',
+        DEPTH_MODEL_ID,
         { device: 'webgpu' },
       );
       pipeline = candidate as unknown as DepthPipeline;
@@ -64,7 +66,7 @@ async function loadPipeline(): Promise<InitResult> {
       try {
         const candidate = await createPipeline(
           'depth-estimation',
-          'depth-anything/Depth-Anything-V2-Small-hf',
+          DEPTH_MODEL_ID,
           { device: 'wasm' },
         );
         pipeline = candidate as unknown as DepthPipeline;
