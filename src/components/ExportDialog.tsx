@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { useStore } from '../store/useStore'
+import { bakeMapsInWorker, useStore } from '../store/useStore'
 import type { ExportFormat, ExportOptions, AxisConvention, TexturePacking, Unit } from '../types'
-import { bakeMap } from '../lib/maps/MapBaker'
 
 const FORMATS: { value: ExportFormat; label: string; desc: string }[] = [
   { value: 'glb', label: 'GLB', desc: 'Binary glTF — single file, game-ready' },
@@ -139,82 +138,26 @@ export default function ExportDialog() {
       const id = crypto.randomUUID()
 
       let mapsData: Record<string, { width: number; height: number; data: ArrayBuffer }> | undefined
+      const shouldBakeMaps = depthResult && (
+        format === 'maps-zip' ||
+        format === 'glb' ||
+        (showTextures && includeTextures)
+      )
 
-      if (showTextures && depthResult) {
-        mapsData = {}
-
-        if (maps.normal.enabled) {
-          const result = bakeMap({
-            heights: depthResult.data,
-            width: depthResult.width,
-            height: depthResult.height,
-            resolution: depthResult.width,
-            mapType: 'normal',
-            strength: maps.normal.strength,
-            flipY: maps.normal.flipY,
-          })
-          mapsData.normal = {
-            width: result.imageData.width,
-            height: result.imageData.height,
-            data: result.imageData.data.buffer.slice(0),
-          }
-        }
-
-        if (maps.ao.enabled) {
-          const result = bakeMap({
-            heights: depthResult.data,
-            width: depthResult.width,
-            height: depthResult.height,
-            resolution: depthResult.width,
-            mapType: 'ao',
-            strength: maps.ao.intensity,
-          })
-          mapsData.ao = {
-            width: result.imageData.width,
-            height: result.imageData.height,
-            data: result.imageData.data.buffer.slice(0),
-          }
-        }
-
-        if (maps.roughness.mode === 'fromLuma') {
-          const result = bakeMap({
-            heights: depthResult.data,
-            width: depthResult.width,
-            height: depthResult.height,
-            resolution: depthResult.width,
-            mapType: 'roughness',
-          })
-          mapsData.roughness = {
-            width: result.imageData.width,
-            height: result.imageData.height,
-            data: result.imageData.data.buffer.slice(0),
-          }
-        }
-
-        if (maps.height.enabled) {
-          const result = bakeMap({
-            heights: depthResult.data,
-            width: depthResult.width,
-            height: depthResult.height,
-            resolution: depthResult.width,
-            mapType: 'height',
-          })
-          mapsData.height = {
-            width: result.imageData.width,
-            height: result.imageData.height,
-            data: result.imageData.data.buffer.slice(0),
-          }
-        }
-
+      if (depthResult && shouldBakeMaps) {
+        setProcessing(true, 'Baking PBR maps...')
+        mapsData = await bakeMapsInWorker(depthResult, maps)
         if (Object.keys(mapsData).length === 0) {
           mapsData = undefined
         }
       }
 
+      setProcessing(true, 'Exporting...')
+
       const options: ExportOptions = {
         format,
         axisConvention: axis,
-        includeTextures: showTextures ? includeTextures : false,
+        includeTextures: format !== 'maps-zip' && Boolean(shouldBakeMaps),
         texturePacking,
         units: unit,
         scale,

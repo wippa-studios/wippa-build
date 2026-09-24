@@ -17,6 +17,7 @@ import type {
   AxisConvention,
   ProjectParams,
   ProjectData,
+  BakedMapData,
   PreviewMaps,
 } from '../types';
 
@@ -436,22 +437,7 @@ type PreviewMapRequest = {
   flipY?: boolean;
 };
 
-function cancelPreviewMapGeneration(worker: Worker): void {
-  if (activePreviewMapId && activePreviewMapPosted) {
-    worker.postMessage({ type: 'cancel', id: activePreviewMapId });
-  }
-  activePreviewMapId = null;
-  activePreviewMapPosted = false;
-}
-
-function requestPreviewMaps(
-  depth: DepthResult,
-  maps: MapParams,
-  set: (partial: SetState) => void,
-): void {
-  const worker = getMeshWorker();
-  cancelPreviewMapGeneration(worker);
-
+function getMapRequests(maps: MapParams): PreviewMapRequest[] {
   const requests: PreviewMapRequest[] = [];
   if (maps.normal.enabled) {
     requests.push({
@@ -471,6 +457,26 @@ function requestPreviewMaps(
   if (maps.height.enabled) {
     requests.push({ mapType: 'height' });
   }
+  return requests;
+}
+
+function cancelPreviewMapGeneration(worker: Worker): void {
+  if (activePreviewMapId && activePreviewMapPosted) {
+    worker.postMessage({ type: 'cancel', id: activePreviewMapId });
+  }
+  activePreviewMapId = null;
+  activePreviewMapPosted = false;
+}
+
+function requestPreviewMaps(
+  depth: DepthResult,
+  maps: MapParams,
+  set: (partial: SetState) => void,
+): void {
+  const worker = getMeshWorker();
+  cancelPreviewMapGeneration(worker);
+
+  const requests = getMapRequests(maps);
 
   if (requests.length === 0) {
     set({ previewMaps: {} });
@@ -532,6 +538,70 @@ function requestPreviewMaps(
     },
     [heights.buffer],
   );
+}
+
+export function bakeMapsInWorker(
+  depth: DepthResult,
+  maps: MapParams,
+): Promise<Record<string, BakedMapData>> {
+  const requests = getMapRequests(maps);
+  if (requests.length === 0) return Promise.resolve({});
+
+  const worker = getMeshWorker();
+  const id = crypto.randomUUID();
+  const heights = depth.data.slice();
+
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      worker.removeEventListener('message', onMessage);
+      worker.removeEventListener('error', onError);
+    };
+
+    const onMessage = (event: MessageEvent) => {
+      const data = event.data;
+      if (data.type === 'maps-result' && data.id === id) {
+        cleanup();
+        const result: Record<string, BakedMapData> = {};
+        const entries = data.maps as Array<{
+          mapType: MapType;
+          width: number;
+          height: number;
+          data: ArrayBuffer;
+        }>;
+        for (const entry of entries) {
+          result[entry.mapType] = {
+            width: entry.width,
+            height: entry.height,
+            data: entry.data,
+          };
+        }
+        resolve(result);
+      } else if (data.type === 'error' && data.id === id) {
+        cleanup();
+        reject(new Error(data.error));
+      }
+    };
+
+    const onError = (event: ErrorEvent) => {
+      cleanup();
+      reject(new Error(event.message || 'Map worker failed'));
+    };
+
+    worker.addEventListener('message', onMessage);
+    worker.addEventListener('error', onError);
+    worker.postMessage(
+      {
+        type: 'build-maps',
+        id,
+        heights,
+        width: depth.width,
+        height: depth.height,
+        resolution: depth.width,
+        mapRequests: requests,
+      },
+      [heights.buffer],
+    );
+  });
 }
 
 function b64Encode(bytes: Uint8Array): string {
