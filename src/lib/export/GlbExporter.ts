@@ -41,6 +41,28 @@ interface ImageDef {
   byteLength: number;
 }
 
+function assertValidMesh(mesh: MeshBuildResult): number {
+  const vertexCount = mesh.positions.length / 3;
+  if (!Number.isInteger(vertexCount)) {
+    throw new Error('Mesh positions must contain three values per vertex');
+  }
+  if (mesh.normals.length !== mesh.positions.length) {
+    throw new Error('Mesh normals must match the position count');
+  }
+  if (mesh.uvs.length !== vertexCount * 2) {
+    throw new Error('Mesh UVs must contain two values per vertex');
+  }
+  if (mesh.indices.length % 3 !== 0) {
+    throw new Error('Mesh indices must contain complete triangles');
+  }
+  for (const index of mesh.indices) {
+    if (index >= vertexCount) {
+      throw new Error('Mesh index points outside the vertex buffer');
+    }
+  }
+  return vertexCount;
+}
+
 function buildGltfJson(
   mesh: MeshBuildResult,
   imageDefs: ImageDef[],
@@ -245,6 +267,7 @@ export async function exportGlb(
   maps?: { normal?: Blob; ao?: Blob; roughness?: Blob; height?: Blob },
 ): Promise<Blob> {
   const exportMesh = transformMesh(mesh, options.axisConvention, options.scale);
+  assertValidMesh(exportMesh);
   const vertexCount = exportMesh.positions.length / 3;
   const indexCount = exportMesh.indices.length;
   const useShortIndices = vertexCount < 65536;
@@ -370,6 +393,7 @@ export async function exportGltf(
   maps?: { normal?: Blob; ao?: Blob; roughness?: Blob; height?: Blob },
 ): Promise<{ json: object; bin: ArrayBuffer; binName: string; textures: Map<string, Blob> }> {
   const exportMesh = transformMesh(mesh, options.axisConvention, options.scale);
+  assertValidMesh(exportMesh);
   const vertexCount = exportMesh.positions.length / 3;
   const useShortIndices = vertexCount < 65536;
 
