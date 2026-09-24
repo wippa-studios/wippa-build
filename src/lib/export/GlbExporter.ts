@@ -357,7 +357,7 @@ export async function exportGltf(
   options: ExportOptions,
   albedoImage?: Blob,
   maps?: { normal?: Blob; ao?: Blob; roughness?: Blob; height?: Blob },
-): Promise<{ json: object; textures: Map<string, Blob> }> {
+): Promise<{ json: object; bin: ArrayBuffer; textures: Map<string, Blob> }> {
   const vertexCount = mesh.positions.length / 3;
   const useShortIndices = vertexCount < 65536;
 
@@ -385,6 +385,51 @@ export async function exportGltf(
     imageDefs.push({ name: 'height.png', mimeType: 'image/png', byteLength: 0 });
   }
 
+  // Build geometry buffer (same as GLB but without images)
+  const posBytes = vertexCount * 12;
+  const normBytes = vertexCount * 12;
+  const uvBytes = vertexCount * 8;
+  const idxBytes = mesh.indices.length * (useShortIndices ? 2 : 4);
+  const geometryBytes = posBytes + normBytes + uvBytes + idxBytes;
+
+  const binBuffer = new ArrayBuffer(geometryBytes);
+  const binBytes = new Uint8Array(binBuffer);
+
+  let writeOffset = 0;
+
+  binBytes.set(
+    new Uint8Array(mesh.positions.buffer, mesh.positions.byteOffset, posBytes),
+    writeOffset,
+  );
+  writeOffset += posBytes;
+
+  binBytes.set(
+    new Uint8Array(mesh.normals.buffer, mesh.normals.byteOffset, normBytes),
+    writeOffset,
+  );
+  writeOffset += normBytes;
+
+  binBytes.set(
+    new Uint8Array(mesh.uvs.buffer, mesh.uvs.byteOffset, uvBytes),
+    writeOffset,
+  );
+  writeOffset += uvBytes;
+
+  if (useShortIndices) {
+    const shortIndices = new Uint16Array(mesh.indices);
+    binBytes.set(
+      new Uint8Array(shortIndices.buffer, shortIndices.byteOffset, idxBytes),
+      writeOffset,
+    );
+  } else {
+    binBytes.set(
+      new Uint8Array(mesh.indices.buffer, mesh.indices.byteOffset, idxBytes),
+      writeOffset,
+    );
+  }
+
+  // Update imageDefs with actual byteLengths (0 for glTF since they're external)
+  // But we need to set the buffer byteLength in the JSON
   const json = buildGltfJson(
     mesh,
     imageDefs,
@@ -394,5 +439,11 @@ export async function exportGltf(
     options.axisConvention,
   );
 
-  return { json, textures };
+  // Update the buffer byteLength in the JSON to match the geometry buffer
+  const gltfJson = json as {
+    buffers: Array<{ byteLength: number }>;
+  };
+  gltfJson.buffers[0].byteLength = geometryBytes;
+
+  return { json, bin: binBuffer, textures };
 }

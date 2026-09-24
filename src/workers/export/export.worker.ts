@@ -24,6 +24,7 @@ type WorkerResult =
       id: string;
       format: 'gltf';
       json: object;
+      bin: ArrayBuffer;
       textures: Array<{ name: string; blob: Blob }>;
     }
   | { type: 'export-result'; id: string; format: 'obj'; obj: string; mtl: string }
@@ -93,7 +94,7 @@ async function handleExport(msg: {
       result.textures.forEach((blob, name) => {
         textures.push({ name, blob });
       });
-      return { type: 'export-result', id, format: 'gltf', json: result.json, textures };
+      return { type: 'export-result', id, format: 'gltf', json: result.json, bin: result.bin, textures };
     }
 
     case 'obj': {
