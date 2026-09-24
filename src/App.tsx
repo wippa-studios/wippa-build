@@ -5,7 +5,6 @@ import LeftPanel from './components/LeftPanel'
 import RightPanel from './components/RightPanel'
 import Viewport from './components/Viewport'
 import ExportDialog from './components/ExportDialog'
-import { useCallback as useCallbackRef } from 'react'
 
 export default function App() {
   const image = useStore((s) => s.image)
