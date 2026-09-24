@@ -1,8 +1,8 @@
-import type { MeshBuildResult, ExportOptions, ExportFormat } from '../../types';
+import type { MeshBuildResult, ExportOptions } from '../../types';
 import { exportGlb, exportGltf } from '../../lib/export/GlbExporter';
 import { exportObjWithMtl } from '../../lib/export/ObjExporter';
 import { exportStl } from '../../lib/export/StlExporter';
-import { bakeMap, imageDataToPngBlob } from '../../lib/maps/MapBaker';
+import { imageDataToPngBlob } from '../../lib/maps/MapBaker';
 
 type ExportMessage =
   | {

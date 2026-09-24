@@ -1,4 +1,4 @@
-import type { MapBakeInput, MapBakeResult, MapType } from '../../types';
+import type { MapBakeInput, MapBakeResult } from '../../types';
 
 function getHeight(heights: Float32Array, w: number, h: number, x: number, y: number): number {
   if (x < 0 || x >= w || y < 0 || y >= h) return 0;

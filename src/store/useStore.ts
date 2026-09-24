@@ -197,7 +197,6 @@ async function detectCapability(): Promise<DeviceCapability> {
 }
 
 type SetState = StoreState | Partial<StoreState> | ((s: StoreState) => StoreState | Partial<StoreState>);
-type GetState = () => StoreState;
 
 function ensureDepthInitialized(worker: Worker): Promise<DepthInitResult> {
   if (depthInitPromise) return depthInitPromise;

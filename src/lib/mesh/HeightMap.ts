@@ -1,4 +1,4 @@
-import type { DepthResult, ReliefParams, ReliefSource } from '../../types';
+import type { ReliefSource } from '../../types';
 
 export function extractLuma(
   data: Uint8ClampedArray,

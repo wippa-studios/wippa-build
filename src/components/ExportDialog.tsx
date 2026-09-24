@@ -95,7 +95,6 @@ export default function ExportDialog() {
 
   const showTextures = format === 'gltf' || format === 'obj'
   const showPacking = format === 'gltf' && includeTextures
-  const mapsZipDisabled = format !== 'maps-zip' && !showTextures
 
   const dims = mesh
     ? {

@@ -34,6 +34,7 @@ export default function App() {
           onDragOver={handleDragOver}
         >
           <Viewport />
+          <ExportDialog />
           {!image && <DropZone />}
         </div>
         {rightPanelOpen && <RightPanel />}

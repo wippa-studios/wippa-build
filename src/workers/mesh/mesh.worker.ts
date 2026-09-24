@@ -1,4 +1,4 @@
-import type { MapType, MeshBuildInput, MeshBuildResult, ReliefSource } from '../../types';
+import type { MapType, MeshBuildInput, ReliefSource } from '../../types';
 import { buildPlaneMesh, buildPlateMesh } from '../../lib/mesh/MeshBuilder';
 import { createHeightmapFromImageData, gaussianBlur } from '../../lib/mesh/HeightMap';
 import { bakeMap } from '../../lib/maps/MapBaker';
