@@ -1,7 +1,7 @@
 import type { MapType, MeshBuildInput, ReliefSource } from '../../types';
 import { createCancellationRegistry } from '../../lib/workers/cancellation';
 import { buildPlaneMesh, buildPlateMesh } from '../../lib/mesh/MeshBuilder';
-import { createHeightmapFromImageData, gaussianBlur } from '../../lib/mesh/HeightMap';
+import { createHeightmapFromImageData, gaussianBlur, resampleHeights } from '../../lib/mesh/HeightMap';
 import { bakeMap } from '../../lib/maps/MapBaker';
 
 type MapRequest = {
@@ -32,6 +32,7 @@ type WorkerMessage =
   | { type: 'cancel'; id: string };
 
 const cancelled = createCancellationRegistry();
+const MAX_MAP_DIMENSION = 1024;
 
 self.onmessage = (event: MessageEvent<WorkerMessage>) => {
   const message = event.data;
@@ -48,10 +49,26 @@ self.onmessage = (event: MessageEvent<WorkerMessage>) => {
       if (cancelled.consume(id)) break;
 
       try {
+        if (input.heights.length !== input.width * input.height) {
+          throw new Error('Heightmap dimensions do not match the supplied data');
+        }
+
+        const workingSize = input.resolution;
+        if (!Number.isInteger(workingSize) || workingSize < 2) {
+          throw new Error('Mesh resolution must be an integer of at least 2');
+        }
+        const workingHeights = input.width === workingSize && input.height === workingSize
+          ? input.heights
+          : resampleHeights(input.heights, input.width, input.height, workingSize, workingSize);
         const heights = input.smoothing > 0
-          ? gaussianBlur(input.heights, input.width, input.height, input.smoothing)
-          : input.heights;
-        const buildInput: MeshBuildInput = { ...input, heights };
+          ? gaussianBlur(workingHeights, workingSize, workingSize, input.smoothing)
+          : workingHeights;
+        const buildInput: MeshBuildInput = {
+          ...input,
+          heights,
+          width: workingSize,
+          height: workingSize,
+        };
         const result = input.style === 'plate'
           ? buildPlateMesh(buildInput)
           : buildPlaneMesh(buildInput);
@@ -105,10 +122,16 @@ self.onmessage = (event: MessageEvent<WorkerMessage>) => {
     }
 
     case 'build-maps': {
-      const { id, heights, width, height, resolution, mapRequests } = message;
+      const { id, heights, width, height, mapRequests } = message;
       if (cancelled.consume(id)) break;
 
       try {
+        const scale = Math.min(1, MAX_MAP_DIMENSION / Math.max(width, height));
+        const mapWidth = Math.max(1, Math.round(width * scale));
+        const mapHeight = Math.max(1, Math.round(height * scale));
+        const mapHeights = mapWidth === width && mapHeight === height
+          ? heights
+          : resampleHeights(heights, width, height, mapWidth, mapHeight);
         const maps: Array<{
           mapType: MapType;
           width: number;
@@ -121,10 +144,10 @@ self.onmessage = (event: MessageEvent<WorkerMessage>) => {
           if (cancelled.has(id)) break;
 
           const { imageData } = bakeMap({
-            heights,
-            width,
-            height,
-            resolution,
+            heights: mapHeights,
+            width: mapWidth,
+            height: mapHeight,
+            resolution: mapWidth,
             mapType: request.mapType,
             strength: request.strength,
             flipY: request.flipY,

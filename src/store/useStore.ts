@@ -138,6 +138,7 @@ interface DepthInitResult {
 }
 
 let meshWorker: Worker | null = null;
+let mapWorker: Worker | null = null;
 let depthWorker: Worker | null = null;
 let depthInitPromise: Promise<DepthInitResult> | null = null;
 let activeDepthRequestId: string | null = null;
@@ -152,6 +153,20 @@ let activeMeshCleanup: (() => void) | null = null;
 let meshDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let reliefDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let errorTimeout: ReturnType<typeof setTimeout> | null = null;
+let operationGeneration = 0;
+
+function invalidateOperations(): number {
+  operationGeneration += 1;
+  clearMeshDebounce();
+  clearReliefDebounce();
+  if (depthWorker) cancelDepthEstimation(depthWorker);
+  if (mapWorker) cancelPreviewMapGeneration(mapWorker);
+  if (meshWorker) {
+    cancelHeightmapExtraction(meshWorker);
+    cancelMeshGeneration(meshWorker);
+  }
+  return operationGeneration;
+}
 
 function getMeshWorker(): Worker {
   if (!meshWorker) {
@@ -161,6 +176,16 @@ function getMeshWorker(): Worker {
     );
   }
   return meshWorker;
+}
+
+function getMapWorker(): Worker {
+  if (!mapWorker) {
+    mapWorker = new Worker(
+      new URL('../workers/mesh/mesh.worker.ts', import.meta.url),
+      { type: 'module' }
+    );
+  }
+  return mapWorker;
 }
 
 function getDepthWorker(): Worker {
@@ -216,6 +241,11 @@ function ensureDepthInitialized(worker: Worker): Promise<DepthInitResult> {
 
     const onError = (event: ErrorEvent) => {
       cleanup();
+      if (depthWorker === worker) {
+        worker.terminate();
+        depthWorker = null;
+        depthInitPromise = null;
+      }
       reject(new Error(event.message || 'Depth worker initialization failed'));
     };
 
@@ -248,6 +278,7 @@ function requestDepthEstimation(
   bitmap: ImageBitmap,
   invert: boolean,
   set: (partial: SetState) => void,
+  generation = operationGeneration,
 ): void {
   const worker = getDepthWorker();
   cancelDepthEstimation(worker);
@@ -273,7 +304,7 @@ function requestDepthEstimation(
       return;
     }
 
-    if (activeDepthRequestId !== id) return;
+    if (generation !== operationGeneration || activeDepthRequestId !== id) return;
 
     let image: ImageBitmap;
     try {
@@ -300,7 +331,7 @@ function requestDepthEstimation(
       const data = event.data;
       if (data.type === 'depth-result' && data.id === id) {
         cleanup();
-        if (activeDepthRequestId !== id) return;
+        if (generation !== operationGeneration || activeDepthRequestId !== id) return;
 
         activeDepthRequestId = null;
         activeDepthEstimatePosted = false;
@@ -318,7 +349,7 @@ function requestDepthEstimation(
         requestMeshGeneration(depth.data, depth.width, depth.height, useStore.getState(), set);
       } else if (data.type === 'error' && data.id === id) {
         cleanup();
-        if (activeDepthRequestId !== id) return;
+        if (generation !== operationGeneration || activeDepthRequestId !== id) return;
 
         activeDepthRequestId = null;
         set({
@@ -331,9 +362,27 @@ function requestDepthEstimation(
 
     const cleanup = () => {
       worker.removeEventListener('message', onMessage);
+      worker.removeEventListener('error', onError);
+    };
+
+    const onError = (event: ErrorEvent) => {
+      image.close();
+      if (depthWorker === worker) {
+        worker.terminate();
+        depthWorker = null;
+        depthInitPromise = null;
+      }
+      onMessage({
+        data: {
+          type: 'error',
+          id,
+          error: event.message || 'Depth worker failed',
+        },
+      } as MessageEvent);
     };
 
     worker.addEventListener('message', onMessage);
+    worker.addEventListener('error', onError);
     activeDepthEstimatePosted = true;
     worker.postMessage(
       {
@@ -379,6 +428,7 @@ function requestHeightmapExtraction(
   bitmap: ImageBitmap,
   relief: ReliefParams,
   set: (partial: SetState) => void,
+  generation = operationGeneration,
 ): void {
   const worker = getMeshWorker();
   cancelHeightmapExtraction(worker);
@@ -391,7 +441,7 @@ function requestHeightmapExtraction(
     try {
       image = await createImageBitmap(bitmap);
     } catch (error) {
-      if (activeHeightmapRequestId === id) {
+      if (generation === operationGeneration && activeHeightmapRequestId === id) {
         activeHeightmapRequestId = null;
         activeHeightmapPosted = false;
         set({
@@ -403,7 +453,7 @@ function requestHeightmapExtraction(
       return;
     }
 
-    if (activeHeightmapRequestId !== id) {
+    if (generation !== operationGeneration || activeHeightmapRequestId !== id) {
       image.close();
       return;
     }
@@ -412,7 +462,7 @@ function requestHeightmapExtraction(
       const data = event.data;
       if (data.type === 'heightmap-result' && data.id === id) {
         cleanup();
-        if (activeHeightmapRequestId !== id) return;
+        if (generation !== operationGeneration || activeHeightmapRequestId !== id) return;
 
         activeHeightmapRequestId = null;
         activeHeightmapPosted = false;
@@ -425,7 +475,7 @@ function requestHeightmapExtraction(
         requestMeshGeneration(depth.data, depth.width, depth.height, useStore.getState(), set);
       } else if (data.type === 'error' && data.id === id) {
         cleanup();
-        if (activeHeightmapRequestId !== id) return;
+        if (generation !== operationGeneration || activeHeightmapRequestId !== id) return;
 
         activeHeightmapRequestId = null;
         activeHeightmapPosted = false;
@@ -439,9 +489,26 @@ function requestHeightmapExtraction(
 
     const cleanup = () => {
       worker.removeEventListener('message', onMessage);
+      worker.removeEventListener('error', onError);
+    };
+
+    const onError = (event: ErrorEvent) => {
+      image.close();
+      if (meshWorker === worker) {
+        worker.terminate();
+        meshWorker = null;
+      }
+      onMessage({
+        data: {
+          type: 'error',
+          id,
+          error: event.message || 'Heightmap worker failed',
+        },
+      } as MessageEvent);
     };
 
     worker.addEventListener('message', onMessage);
+    worker.addEventListener('error', onError);
     activeHeightmapPosted = true;
     worker.postMessage(
       {
@@ -477,6 +544,7 @@ function clearMeshDebounce(): void {
 function scheduleMeshGeneration(set: (partial: SetState) => void): void {
   clearMeshDebounce();
   if (meshWorker) cancelMeshGeneration(meshWorker);
+  const generation = operationGeneration;
   meshDebounceTimer = setTimeout(() => {
     meshDebounceTimer = null;
     const state = useStore.getState();
@@ -487,6 +555,7 @@ function scheduleMeshGeneration(set: (partial: SetState) => void): void {
       state.depthResult.height,
       state,
       set,
+      generation,
     );
   }, 150);
 }
@@ -503,6 +572,7 @@ function requestMeshGeneration(
   height: number,
   state: StoreState,
   set: (partial: SetState) => void,
+  generation = operationGeneration,
 ): void {
   clearMeshDebounce();
   const worker = getMeshWorker();
@@ -512,6 +582,7 @@ function requestMeshGeneration(
 
   const cleanup = () => {
     worker.removeEventListener('message', onMessage);
+    worker.removeEventListener('error', onError);
     if (activeMeshCleanup === cleanup) activeMeshCleanup = null;
   };
 
@@ -519,7 +590,7 @@ function requestMeshGeneration(
     const data = event.data;
     if (data.type === 'mesh-result' && data.id === id) {
       cleanup();
-      if (activeMeshRequestId !== id) return;
+      if (generation !== operationGeneration || activeMeshRequestId !== id) return;
 
       activeMeshRequestId = null;
       activeMeshRequestPosted = false;
@@ -541,7 +612,7 @@ function requestMeshGeneration(
       });
     } else if (data.type === 'error' && data.id === id) {
       cleanup();
-      if (activeMeshRequestId !== id) return;
+      if (generation !== operationGeneration || activeMeshRequestId !== id) return;
 
       activeMeshRequestId = null;
       activeMeshRequestPosted = false;
@@ -558,6 +629,7 @@ function requestMeshGeneration(
           height,
           { ...state, resolution: fallbackResolution },
           set,
+          generation,
         );
         return;
       }
@@ -570,8 +642,23 @@ function requestMeshGeneration(
     }
   };
 
+  const onError = (event: ErrorEvent) => {
+    if (meshWorker === worker) {
+      worker.terminate();
+      meshWorker = null;
+    }
+    onMessage({
+      data: {
+        type: 'error',
+        id,
+        error: event.message || 'Mesh worker failed',
+      },
+    } as MessageEvent);
+  };
+
   activeMeshCleanup = cleanup;
   worker.addEventListener('message', onMessage);
+  worker.addEventListener('error', onError);
   activeMeshRequestPosted = true;
   worker.postMessage({
     type: 'build-mesh',
@@ -630,8 +717,9 @@ function requestPreviewMaps(
   depth: DepthResult,
   maps: MapParams,
   set: (partial: SetState) => void,
+  generation = operationGeneration,
 ): void {
-  const worker = getMeshWorker();
+  const worker = getMapWorker();
   cancelPreviewMapGeneration(worker);
 
   const requests = getMapRequests(maps);
@@ -649,7 +737,7 @@ function requestPreviewMaps(
     const data = event.data;
     if (data.type === 'maps-result' && data.id === id) {
       cleanup();
-      if (activePreviewMapId !== id) return;
+      if (generation !== operationGeneration || activePreviewMapId !== id) return;
 
       activePreviewMapId = null;
       activePreviewMapPosted = false;
@@ -670,7 +758,7 @@ function requestPreviewMaps(
       set({ previewMaps });
     } else if (data.type === 'error' && data.id === id) {
       cleanup();
-      if (activePreviewMapId !== id) return;
+      if (generation !== operationGeneration || activePreviewMapId !== id) return;
 
       activePreviewMapId = null;
       activePreviewMapPosted = false;
@@ -680,9 +768,25 @@ function requestPreviewMaps(
 
   const cleanup = () => {
     worker.removeEventListener('message', onMessage);
+    worker.removeEventListener('error', onError);
+  };
+
+  const onError = (event: ErrorEvent) => {
+    if (mapWorker === worker) {
+      worker.terminate();
+      mapWorker = null;
+    }
+    onMessage({
+      data: {
+        type: 'error',
+        id,
+        error: event.message || 'Preview map worker failed',
+      },
+    } as MessageEvent);
   };
 
   worker.addEventListener('message', onMessage);
+  worker.addEventListener('error', onError);
   activePreviewMapPosted = true;
   worker.postMessage(
     {
@@ -705,20 +809,29 @@ export function bakeMapsInWorker(
   const requests = getMapRequests(maps);
   if (requests.length === 0) return Promise.resolve({});
 
-  const worker = getMeshWorker();
+  const worker = getMapWorker();
   const id = crypto.randomUUID();
   const heights = depth.data.slice();
 
   return new Promise((resolve, reject) => {
+    let settled = false;
+
     const cleanup = () => {
       worker.removeEventListener('message', onMessage);
       worker.removeEventListener('error', onError);
+      clearTimeout(timeout);
+    };
+
+    const settle = (action: () => void) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      action();
     };
 
     const onMessage = (event: MessageEvent) => {
       const data = event.data;
       if (data.type === 'maps-result' && data.id === id) {
-        cleanup();
         const result: Record<string, BakedMapData> = {};
         const entries = data.maps as Array<{
           mapType: MapType;
@@ -733,17 +846,28 @@ export function bakeMapsInWorker(
             data: entry.data,
           };
         }
-        resolve(result);
+        settle(() => resolve(result));
       } else if (data.type === 'error' && data.id === id) {
-        cleanup();
-        reject(new Error(data.error));
+        settle(() => reject(new Error(data.error)));
       }
     };
 
     const onError = (event: ErrorEvent) => {
-      cleanup();
-      reject(new Error(event.message || 'Map worker failed'));
+      if (mapWorker === worker) {
+        worker.terminate();
+        mapWorker = null;
+      }
+      settle(() => reject(new Error(event.message || 'Map worker failed')));
     };
+
+    const timeout = setTimeout(() => {
+      worker.postMessage({ type: 'cancel', id });
+      if (mapWorker === worker) {
+        worker.terminate();
+        mapWorker = null;
+      }
+      settle(() => reject(new Error('PBR map baking timed out. Try a lower mesh resolution.')));
+    }, 120_000);
 
     worker.addEventListener('message', onMessage);
     worker.addEventListener('error', onError);
@@ -836,65 +960,81 @@ export const useStore = create<StoreState>((set, get) => ({
 
   // Actions
   loadImage: async (file: File) => {
-    clearMeshDebounce();
-    clearReliefDebounce();
-    if (depthWorker) cancelDepthEstimation(depthWorker);
-    if (meshWorker) {
-      cancelPreviewMapGeneration(meshWorker);
-      cancelHeightmapExtraction(meshWorker);
-      cancelMeshGeneration(meshWorker);
+    if (!file.type.startsWith('image/')) {
+      set({ isProcessing: false, error: 'Please choose a PNG, JPEG, or WebP image.' });
+      return;
     }
+
+    const generation = invalidateOperations();
     const previous = get();
     const url = URL.createObjectURL(file);
-    const bitmap = await createImageBitmap(
-      await fetch(url).then((r) => r.blob())
-    );
-    previous.imageBitmap?.close();
-    if (previous.imageUrl) URL.revokeObjectURL(previous.imageUrl);
+    let bitmap: ImageBitmap | null = null;
 
-    const state = get();
-    const cap = await detectCapability();
+    try {
+      bitmap = await createImageBitmap(await fetch(url).then((r) => r.blob()));
+      if (generation !== operationGeneration) {
+        bitmap.close();
+        URL.revokeObjectURL(url);
+        return;
+      }
 
-    set({
-      image: file,
-      imageUrl: url,
-      imageBitmap: bitmap,
-      imageWidth: bitmap.width,
-      imageHeight: bitmap.height,
-      depthResult: null,
-      meshResult: null,
-      viewportInfo: null,
-      previewMaps: {},
-      isProcessing: true,
-      processingMessage: state.mode === 'ai' ? 'Initializing AI depth estimation...' : 'Generating heightmap...',
-      error: null,
-      capability: cap,
-    });
+      previous.imageBitmap?.close();
+      if (previous.imageUrl) URL.revokeObjectURL(previous.imageUrl);
 
-    if (state.mode === 'relief') {
-      requestHeightmapExtraction(bitmap, state.relief, set);
-    } else if (state.mode === 'ai') {
-      requestDepthEstimation(bitmap, state.ai.invert, set);
+      const state = get();
+      const cap = await detectCapability();
+      if (generation !== operationGeneration) {
+        bitmap.close();
+        URL.revokeObjectURL(url);
+        return;
+      }
+
+      set({
+        image: file,
+        imageUrl: url,
+        imageBitmap: bitmap,
+        imageWidth: bitmap.width,
+        imageHeight: bitmap.height,
+        depthResult: null,
+        meshResult: null,
+        viewportInfo: null,
+        previewMaps: {},
+        isProcessing: true,
+        processingMessage: state.mode === 'ai' ? 'Initializing AI depth estimation...' : 'Generating heightmap...',
+        error: null,
+        capability: cap,
+      });
+
+      if (state.mode === 'relief') {
+        requestHeightmapExtraction(bitmap, state.relief, set, generation);
+      } else if (state.mode === 'ai') {
+        requestDepthEstimation(bitmap, state.ai.invert, set, generation);
+      }
+    } catch (error) {
+      URL.revokeObjectURL(url);
+      bitmap?.close();
+      if (generation === operationGeneration) {
+        set({
+          isProcessing: false,
+          processingMessage: '',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
   },
 
   setMode: async (mode: Mode) => {
-    clearMeshDebounce();
-    clearReliefDebounce();
-    if (depthWorker) cancelDepthEstimation(depthWorker);
-    if (meshWorker) {
-      cancelPreviewMapGeneration(meshWorker);
-      cancelHeightmapExtraction(meshWorker);
-      cancelMeshGeneration(meshWorker);
-    }
+    const generation = invalidateOperations();
     const state = get();
     const cap = await detectCapability();
+    if (generation !== operationGeneration) return;
+
     set({ mode, isProcessing: true, processingMessage: mode === 'ai' ? 'Running AI depth estimation...' : 'Regenerating depth...', capability: cap });
 
     if (mode === 'relief' && state.imageBitmap) {
-      requestHeightmapExtraction(state.imageBitmap, state.relief, set);
+      requestHeightmapExtraction(state.imageBitmap, state.relief, set, generation);
     } else if (mode === 'ai' && state.imageBitmap) {
-      requestDepthEstimation(state.imageBitmap, state.ai.invert, set);
+      requestDepthEstimation(state.imageBitmap, state.ai.invert, set, generation);
     } else {
       set({ depthResult: null, meshResult: null, viewportInfo: null, isProcessing: false, processingMessage: '' });
     }
@@ -991,7 +1131,7 @@ export const useStore = create<StoreState>((set, get) => ({
   refreshPreviewMaps: () => {
     const state = get();
     if (!state.depthResult || state.materialMode !== 'pbr') {
-      if (meshWorker) cancelPreviewMapGeneration(meshWorker);
+      if (mapWorker) cancelPreviewMapGeneration(mapWorker);
       set({ previewMaps: {} });
       return;
     }
@@ -1016,16 +1156,9 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   clearProject: () => {
+    invalidateOperations();
     const s = get();
-    clearMeshDebounce();
-    clearReliefDebounce();
-    if (meshWorker) cancelMeshGeneration(meshWorker);
     s.imageBitmap?.close();
-    if (depthWorker) cancelDepthEstimation(depthWorker);
-    if (meshWorker) {
-      cancelPreviewMapGeneration(meshWorker);
-      cancelHeightmapExtraction(meshWorker);
-    }
     if (s.imageUrl) URL.revokeObjectURL(s.imageUrl);
 
     if (errorTimeout) {
@@ -1096,9 +1229,10 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   loadProject: async (id: string) => {
+    const generation = invalidateOperations();
     const db = await getDB();
     const project = (await db.get(STORE_NAME, id)) as ProjectData | undefined;
-    if (!project) return;
+    if (!project || generation !== operationGeneration) return;
 
     const s = get();
     s.imageBitmap?.close();
@@ -1129,6 +1263,11 @@ export const useStore = create<StoreState>((set, get) => ({
         );
         imageUrl = URL.createObjectURL(imageBlob);
         imageBitmap = await createImageBitmap(imageBlob);
+        if (generation !== operationGeneration) {
+          imageBitmap.close();
+          URL.revokeObjectURL(imageUrl);
+          return;
+        }
       } catch (error) {
         loadError = error instanceof Error ? error.message : String(error);
         image = null;
@@ -1180,20 +1319,23 @@ export const useStore = create<StoreState>((set, get) => ({
       meshResult: null,
       viewportInfo: null,
       previewMaps: {},
+      isProcessing: false,
+      processingMessage: '',
       error: loadError,
       ...project.params,
     });
 
     const cap = await detectCapability();
+    if (generation !== operationGeneration) return;
     set({ capability: cap });
 
     if (depthResult) {
       set({ isProcessing: true, processingMessage: 'Building mesh...' });
-      requestMeshGeneration(depthResult.data, depthResult.width, depthResult.height, get(), set);
+      requestMeshGeneration(depthResult.data, depthResult.width, depthResult.height, get(), set, generation);
     } else if (project.params.mode === 'ai' && imageBitmap) {
       // No cached depth for AI mode, need to re-run estimation
       set({ isProcessing: true, processingMessage: 'Running AI depth estimation...' });
-      requestDepthEstimation(imageBitmap, project.params.ai.invert, set);
+      requestDepthEstimation(imageBitmap, project.params.ai.invert, set, generation);
     }
   },
 

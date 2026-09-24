@@ -57,6 +57,7 @@ function getExportTimeoutMs(triangleCount: number, mapCount: number): number {
 export default function ExportDialog() {
   const exportDialogOpen = useStore((s) => s.exportDialogOpen)
   const mesh = useStore((s) => s.meshResult)
+  const image = useStore((s) => s.image)
   const viewportInfo = useStore((s) => s.viewportInfo)
   const depthResult = useStore((s) => s.depthResult)
   const maps = useStore((s) => s.maps)
@@ -174,7 +175,7 @@ export default function ExportDialog() {
       )
       workerRef.current = worker
 
-      type ExportWorkerResult = { type: string; id: string; format: string; blob?: Blob; json?: object; bin?: ArrayBuffer; binName?: string; obj?: string; mtl?: string; textures?: Array<{ name: string; blob: Blob }>; maps?: Array<{ name: string; blob: Blob }> }
+      type ExportWorkerResult = { type: string; id: string; format: string; blob?: Blob; json?: object; bin?: ArrayBuffer; binName?: string; obj?: string; mtl?: string; mtlName?: string; textures?: Array<{ name: string; blob: Blob }>; maps?: Array<{ name: string; blob: Blob }> }
       const timeoutMs = getExportTimeoutMs(mesh.triangleCount, Object.keys(mapsData ?? {}).length)
       const result = await new Promise<ExportWorkerResult>((resolve, reject) => {
         let settled = false
@@ -213,6 +214,7 @@ export default function ExportDialog() {
           type: 'export',
           id,
           mesh,
+          albedoImage: image ?? undefined,
           options,
           maps: mapsData,
         })
@@ -247,8 +249,11 @@ export default function ExportDialog() {
           )
           downloadBlob(
             new Blob([result.mtl!], { type: 'text/plain' }),
-            `${projectName}.mtl`
+            result.mtlName ?? 'material.mtl'
           )
+          for (const texture of result.textures ?? []) {
+            downloadBlob(texture.blob, texture.name)
+          }
           break
         }
         case 'stl':
@@ -276,7 +281,7 @@ export default function ExportDialog() {
       }
     }
   }, [
-    mesh, format, axis, includeTextures, texturePacking, unit, scale,
+    mesh, image, format, axis, includeTextures, texturePacking, unit, scale,
     showTextures, depthResult, maps,
     close, setProcessing, setError,
   ])
