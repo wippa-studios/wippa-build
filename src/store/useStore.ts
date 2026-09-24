@@ -146,6 +146,11 @@ let activePreviewMapId: string | null = null;
 let activePreviewMapPosted = false;
 let activeHeightmapRequestId: string | null = null;
 let activeHeightmapPosted = false;
+let activeMeshRequestId: string | null = null;
+let activeMeshRequestPosted = false;
+let activeMeshCleanup: (() => void) | null = null;
+let meshDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let reliefDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let errorTimeout: ReturnType<typeof setTimeout> | null = null;
 
 function getMeshWorker(): Worker {
@@ -353,6 +358,24 @@ function cancelHeightmapExtraction(worker: Worker): void {
   activeHeightmapPosted = false;
 }
 
+function clearReliefDebounce(): void {
+  if (reliefDebounceTimer) {
+    clearTimeout(reliefDebounceTimer);
+    reliefDebounceTimer = null;
+  }
+}
+
+function scheduleHeightmapExtraction(set: (partial: SetState) => void): void {
+  clearReliefDebounce();
+  if (meshWorker) cancelHeightmapExtraction(meshWorker);
+  reliefDebounceTimer = setTimeout(() => {
+    reliefDebounceTimer = null;
+    const state = useStore.getState();
+    if (state.mode !== 'relief' || !state.imageBitmap) return;
+    requestHeightmapExtraction(state.imageBitmap, state.relief, set);
+  }, 150);
+}
+
 function requestHeightmapExtraction(
   bitmap: ImageBitmap,
   relief: ReliefParams,
@@ -435,20 +458,66 @@ function requestHeightmapExtraction(
   })();
 }
 
+function cancelMeshGeneration(worker: Worker): void {
+  if (activeMeshRequestId && activeMeshRequestPosted) {
+    worker.postMessage({ type: 'cancel', id: activeMeshRequestId });
+  }
+  activeMeshCleanup?.();
+  activeMeshCleanup = null;
+  activeMeshRequestId = null;
+  activeMeshRequestPosted = false;
+}
+
+function clearMeshDebounce(): void {
+  if (meshDebounceTimer) {
+    clearTimeout(meshDebounceTimer);
+    meshDebounceTimer = null;
+  }
+}
+
+function scheduleMeshGeneration(set: (partial: SetState) => void): void {
+  clearMeshDebounce();
+  if (meshWorker) cancelMeshGeneration(meshWorker);
+  meshDebounceTimer = setTimeout(() => {
+    meshDebounceTimer = null;
+    const state = useStore.getState();
+    if (!state.depthResult) return;
+    requestMeshGeneration(
+      state.depthResult.data,
+      state.depthResult.width,
+      state.depthResult.height,
+      state,
+      set,
+    );
+  }, 150);
+}
+
 function requestMeshGeneration(
   heights: Float32Array,
   width: number,
   height: number,
   state: StoreState,
   set: (partial: SetState) => void,
-) {
+): void {
+  clearMeshDebounce();
   const worker = getMeshWorker();
+  cancelMeshGeneration(worker);
   const id = crypto.randomUUID();
+  activeMeshRequestId = id;
 
-  const onMessage = (e: MessageEvent) => {
-    const data = e.data;
+  const cleanup = () => {
+    worker.removeEventListener('message', onMessage);
+    if (activeMeshCleanup === cleanup) activeMeshCleanup = null;
+  };
+
+  const onMessage = (event: MessageEvent) => {
+    const data = event.data;
     if (data.type === 'mesh-result' && data.id === id) {
-      worker.removeEventListener('message', onMessage);
+      cleanup();
+      if (activeMeshRequestId !== id) return;
+
+      activeMeshRequestId = null;
+      activeMeshRequestPosted = false;
       const result = data.result as MeshBuildResult;
       const viewport: ViewportInfo = {
         triangleCount: result.triangleCount,
@@ -466,7 +535,11 @@ function requestMeshGeneration(
         processingMessage: '',
       });
     } else if (data.type === 'error' && data.id === id) {
-      worker.removeEventListener('message', onMessage);
+      cleanup();
+      if (activeMeshRequestId !== id) return;
+
+      activeMeshRequestId = null;
+      activeMeshRequestPosted = false;
       set({
         isProcessing: false,
         processingMessage: '',
@@ -475,8 +548,9 @@ function requestMeshGeneration(
     }
   };
 
+  activeMeshCleanup = cleanup;
   worker.addEventListener('message', onMessage);
-
+  activeMeshRequestPosted = true;
   worker.postMessage({
     type: 'build-mesh',
     id,
@@ -735,10 +809,13 @@ export const useStore = create<StoreState>((set, get) => ({
 
   // Actions
   loadImage: async (file: File) => {
+    clearMeshDebounce();
+    clearReliefDebounce();
     if (depthWorker) cancelDepthEstimation(depthWorker);
     if (meshWorker) {
       cancelPreviewMapGeneration(meshWorker);
       cancelHeightmapExtraction(meshWorker);
+      cancelMeshGeneration(meshWorker);
     }
     const previous = get();
     const url = URL.createObjectURL(file);
@@ -775,10 +852,13 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   setMode: async (mode: Mode) => {
+    clearMeshDebounce();
+    clearReliefDebounce();
     if (depthWorker) cancelDepthEstimation(depthWorker);
     if (meshWorker) {
       cancelPreviewMapGeneration(meshWorker);
       cancelHeightmapExtraction(meshWorker);
+      cancelMeshGeneration(meshWorker);
     }
     const state = get();
     const cap = await detectCapability();
@@ -804,28 +884,25 @@ export const useStore = create<StoreState>((set, get) => ({
 
   setDepthScale: (scale: number) => {
     set({ depthScale: scale });
-    const state = get();
-    if (state.depthResult) {
+    if (get().depthResult) {
       set({ isProcessing: true, processingMessage: 'Rebuilding mesh...' });
-      requestMeshGeneration(state.depthResult.data, state.depthResult.width, state.depthResult.height, get(), set);
+      scheduleMeshGeneration(set);
     }
   },
 
   setSmoothing: (s: number) => {
     set({ smoothing: s });
-    const state = get();
-    if (state.depthResult) {
+    if (get().depthResult) {
       set({ isProcessing: true, processingMessage: 'Rebuilding mesh...' });
-      requestMeshGeneration(state.depthResult.data, state.depthResult.width, state.depthResult.height, get(), set);
+      scheduleMeshGeneration(set);
     }
   },
 
   setReliefParams: (p: Partial<ReliefParams>) => {
     set((s) => ({ relief: { ...s.relief, ...p } }));
-    const state = get();
-    if (state.mode === 'relief' && state.imageBitmap) {
+    if (get().mode === 'relief' && get().imageBitmap) {
       set({ isProcessing: true, processingMessage: 'Regenerating heightmap...' });
-      requestHeightmapExtraction(state.imageBitmap, state.relief, set);
+      scheduleHeightmapExtraction(set);
     }
   },
 
@@ -913,6 +990,9 @@ export const useStore = create<StoreState>((set, get) => ({
 
   clearProject: () => {
     const s = get();
+    clearMeshDebounce();
+    clearReliefDebounce();
+    if (meshWorker) cancelMeshGeneration(meshWorker);
     s.imageBitmap?.close();
     if (depthWorker) cancelDepthEstimation(depthWorker);
     if (meshWorker) {
