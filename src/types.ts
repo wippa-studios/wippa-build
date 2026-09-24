@@ -71,6 +71,14 @@ export interface MapBakeResult {
   mapType: MapType;
 }
 
+export interface BakedMapData {
+  width: number;
+  height: number;
+  data: ArrayBuffer;
+}
+
+export type PreviewMaps = Partial<Record<MapType, BakedMapData>>;
+
 export interface ExportOptions {
   format: ExportFormat;
   axisConvention: AxisConvention;

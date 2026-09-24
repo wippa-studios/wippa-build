@@ -11,11 +11,13 @@ import type {
   AiParams,
   MeshParams,
   MapParams,
+  MapType,
   TilingParams,
   UnitParams,
   AxisConvention,
   ProjectParams,
   ProjectData,
+  PreviewMaps,
 } from '../types';
 
 function generateId(): string {
@@ -76,6 +78,7 @@ interface StoreState {
   // Mesh state
   meshResult: MeshBuildResult | null;
   viewportInfo: ViewportInfo | null;
+  previewMaps: PreviewMaps;
 
   // Project state
   projectId: string;
@@ -116,6 +119,7 @@ interface StoreState {
   setMeshResult: (r: MeshBuildResult | null) => void;
   setViewportInfo: (v: ViewportInfo | null) => void;
   setDepthResult: (d: DepthResult | null) => void;
+  refreshPreviewMaps: () => void;
   setProcessing: (v: boolean, msg?: string) => void;
   setError: (e: string | null) => void;
   probeCapability: () => Promise<void>;
@@ -137,6 +141,8 @@ let depthWorker: Worker | null = null;
 let depthInitPromise: Promise<DepthInitResult> | null = null;
 let activeDepthRequestId: string | null = null;
 let activeDepthEstimatePosted = false;
+let activePreviewMapId: string | null = null;
+let activePreviewMapPosted = false;
 let errorTimeout: ReturnType<typeof setTimeout> | null = null;
 
 function getMeshWorker(): Worker {
@@ -424,6 +430,110 @@ function requestMeshGeneration(
   });
 }
 
+type PreviewMapRequest = {
+  mapType: MapType;
+  strength?: number;
+  flipY?: boolean;
+};
+
+function cancelPreviewMapGeneration(worker: Worker): void {
+  if (activePreviewMapId && activePreviewMapPosted) {
+    worker.postMessage({ type: 'cancel', id: activePreviewMapId });
+  }
+  activePreviewMapId = null;
+  activePreviewMapPosted = false;
+}
+
+function requestPreviewMaps(
+  depth: DepthResult,
+  maps: MapParams,
+  set: (partial: SetState) => void,
+): void {
+  const worker = getMeshWorker();
+  cancelPreviewMapGeneration(worker);
+
+  const requests: PreviewMapRequest[] = [];
+  if (maps.normal.enabled) {
+    requests.push({
+      mapType: 'normal',
+      strength: maps.normal.strength,
+      flipY: maps.normal.flipY,
+    });
+  }
+  if (maps.ao.enabled) {
+    requests.push({ mapType: 'ao', strength: maps.ao.intensity });
+  }
+  if (maps.roughness.mode === 'constant') {
+    requests.push({ mapType: 'roughness', strength: maps.roughness.value });
+  } else {
+    requests.push({ mapType: 'roughness' });
+  }
+  if (maps.height.enabled) {
+    requests.push({ mapType: 'height' });
+  }
+
+  if (requests.length === 0) {
+    set({ previewMaps: {} });
+    return;
+  }
+
+  const id = crypto.randomUUID();
+  activePreviewMapId = id;
+  const heights = depth.data.slice();
+
+  const onMessage = (event: MessageEvent) => {
+    const data = event.data;
+    if (data.type === 'maps-result' && data.id === id) {
+      cleanup();
+      if (activePreviewMapId !== id) return;
+
+      activePreviewMapId = null;
+      activePreviewMapPosted = false;
+      const previewMaps: PreviewMaps = {};
+      const entries = data.maps as Array<{
+        mapType: MapType;
+        width: number;
+        height: number;
+        data: ArrayBuffer;
+      }>;
+      for (const entry of entries) {
+        previewMaps[entry.mapType] = {
+          width: entry.width,
+          height: entry.height,
+          data: entry.data,
+        };
+      }
+      set({ previewMaps });
+    } else if (data.type === 'error' && data.id === id) {
+      cleanup();
+      if (activePreviewMapId !== id) return;
+
+      activePreviewMapId = null;
+      activePreviewMapPosted = false;
+      set({ previewMaps: {}, error: data.error });
+    }
+  };
+
+  const cleanup = () => {
+    worker.removeEventListener('message', onMessage);
+  };
+
+  worker.addEventListener('message', onMessage);
+  activePreviewMapPosted = true;
+  worker.postMessage(
+    {
+      type: 'build-maps',
+      id,
+      heights,
+      width: depth.width,
+      height: depth.height,
+      resolution: depth.width,
+      mapRequests: requests,
+    },
+    [heights.buffer],
+  );
+}
+
 function b64Encode(bytes: Uint8Array): string {
   let binary = '';
   for (let i = 0; i < bytes.byteLength; i++) {
@@ -465,6 +575,7 @@ export const useStore = create<StoreState>((set, get) => ({
   // Mesh defaults
   meshResult: null,
   viewportInfo: null,
+  previewMaps: {},
 
   // Project defaults
   projectId: generateId(),
@@ -493,10 +604,14 @@ export const useStore = create<StoreState>((set, get) => ({
   // Actions
   loadImage: async (file: File) => {
     if (depthWorker) cancelDepthEstimation(depthWorker);
+    if (meshWorker) cancelPreviewMapGeneration(meshWorker);
+    const previous = get();
     const url = URL.createObjectURL(file);
     const bitmap = await createImageBitmap(
       await fetch(url).then((r) => r.blob())
     );
+    previous.imageBitmap?.close();
+    if (previous.imageUrl) URL.revokeObjectURL(previous.imageUrl);
 
     const state = get();
     const cap = await detectCapability();
@@ -510,6 +625,7 @@ export const useStore = create<StoreState>((set, get) => ({
       depthResult: null,
       meshResult: null,
       viewportInfo: null,
+      previewMaps: {},
       isProcessing: true,
       processingMessage: state.mode === 'ai' ? 'Initializing AI depth estimation...' : 'Generating heightmap...',
       error: null,
@@ -535,6 +651,7 @@ export const useStore = create<StoreState>((set, get) => ({
 
   setMode: async (mode: Mode) => {
     if (depthWorker) cancelDepthEstimation(depthWorker);
+    if (meshWorker) cancelPreviewMapGeneration(meshWorker);
     const state = get();
     const cap = await detectCapability();
     set({ mode, isProcessing: true, processingMessage: mode === 'ai' ? 'Running AI depth estimation...' : 'Regenerating depth...', capability: cap });
@@ -653,6 +770,16 @@ export const useStore = create<StoreState>((set, get) => ({
   setViewportInfo: (v: ViewportInfo | null) => set({ viewportInfo: v }),
   setDepthResult: (d: DepthResult | null) => set({ depthResult: d }),
 
+  refreshPreviewMaps: () => {
+    const state = get();
+    if (!state.depthResult || state.materialMode !== 'pbr') {
+      if (meshWorker) cancelPreviewMapGeneration(meshWorker);
+      set({ previewMaps: {} });
+      return;
+    }
+    requestPreviewMaps(state.depthResult, state.maps, set);
+  },
+
   setProcessing: (v: boolean, msg?: string) => set({ isProcessing: v, processingMessage: msg ?? '' }),
 
   setError: (e: string | null) => {
@@ -672,7 +799,9 @@ export const useStore = create<StoreState>((set, get) => ({
 
   clearProject: () => {
     const s = get();
+    s.imageBitmap?.close();
     if (depthWorker) cancelDepthEstimation(depthWorker);
+    if (meshWorker) cancelPreviewMapGeneration(meshWorker);
     if (s.imageUrl) URL.revokeObjectURL(s.imageUrl);
 
     if (errorTimeout) {
@@ -689,6 +818,7 @@ export const useStore = create<StoreState>((set, get) => ({
       depthResult: null,
       meshResult: null,
       viewportInfo: null,
+      previewMaps: {},
       isProcessing: false,
       processingMessage: '',
       error: null,
@@ -751,6 +881,7 @@ export const useStore = create<StoreState>((set, get) => ({
     if (!project) return;
 
     const s = get();
+    s.imageBitmap?.close();
     if (s.imageUrl) URL.revokeObjectURL(s.imageUrl);
 
     let imageBitmap: ImageBitmap | null = null;
@@ -784,6 +915,7 @@ export const useStore = create<StoreState>((set, get) => ({
       depthResult,
       meshResult: null,
       viewportInfo: null,
+      previewMaps: {},
       ...project.params,
     });
 
