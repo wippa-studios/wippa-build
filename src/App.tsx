@@ -13,6 +13,7 @@ export default function App() {
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
+    if (useStore.getState().exportDialogOpen) return
     const file = e.dataTransfer.files[0]
     if (file && file.type.startsWith('image/')) {
       useStore.getState().loadImage(file)
@@ -74,6 +75,7 @@ function DropZone() {
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
     e.stopPropagation()
+    if (useStore.getState().exportDialogOpen) return
     const file = e.dataTransfer.files[0]
     if (file && file.type.startsWith('image/')) {
       loadImage(file)

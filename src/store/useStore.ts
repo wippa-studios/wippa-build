@@ -189,6 +189,7 @@ interface StoreState {
   setDepthResult: (d: DepthResult | null) => void;
   refreshPreviewMaps: () => void;
   setProcessing: (v: boolean, msg?: string) => void;
+  getOperationGeneration: () => number;
   setError: (e: string | null) => void;
   probeCapability: () => Promise<void>;
   clearProject: () => void;
@@ -1297,6 +1298,7 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   setProcessing: (v: boolean, msg?: string) => set({ isProcessing: v, processingMessage: msg ?? '' }),
+  getOperationGeneration: () => operationGeneration,
 
   setError: (e: string | null) => {
     set({ error: e });
@@ -1492,8 +1494,16 @@ export const useStore = create<StoreState>((set, get) => ({
             }
           : undefined,
       };
+      const migrationRevision = saveRevision;
+      const migrationWrite = saveQueue.then(async () => {
+        if (generation !== operationGeneration || migrationRevision !== saveRevision) return;
+        const migrationDb = await getDB();
+        if (generation !== operationGeneration || migrationRevision !== saveRevision) return;
+        await migrationDb.put(STORE_NAME, upgraded);
+      });
+      saveQueue = migrationWrite.catch(() => undefined);
       try {
-        await db.put(STORE_NAME, upgraded);
+        await migrationWrite;
       } catch (error) {
         loadError = error instanceof Error ? error.message : 'Project migration could not be saved';
       }

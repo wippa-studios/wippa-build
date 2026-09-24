@@ -141,6 +141,7 @@ export default function ExportDialog() {
       return
     }
 
+    const exportGeneration = useStore.getState().getOperationGeneration()
     setExporting(true)
     setExportError(null)
     setProcessing(true, 'Exporting...')
@@ -161,6 +162,10 @@ export default function ExportDialog() {
         if (Object.keys(mapsData).length === 0) {
           mapsData = undefined
         }
+      }
+
+      if (useStore.getState().getOperationGeneration() !== exportGeneration) {
+        throw new Error('Project changed while maps were being prepared. Start the export again.')
       }
 
       setProcessing(true, 'Exporting...')
@@ -238,6 +243,10 @@ export default function ExportDialog() {
         ])
       })
 
+      if (useStore.getState().getOperationGeneration() !== exportGeneration) {
+        throw new Error('Project changed while the export was running. Start the export again.')
+      }
+
       const projectName = useStore.getState().projectName.replace(/[^a-zA-Z0-9-_]/g, '_') || 'export'
 
       switch (result.format) {
@@ -292,7 +301,9 @@ export default function ExportDialog() {
       setError(msg)
     } finally {
       setExporting(false)
-      setProcessing(false)
+      if (useStore.getState().getOperationGeneration() === exportGeneration) {
+        setProcessing(false)
+      }
       if (workerRef.current) {
         workerRef.current.terminate()
         workerRef.current = null
